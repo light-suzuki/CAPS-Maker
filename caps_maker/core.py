@@ -14,6 +14,7 @@ from typing import Dict, List, Sequence, Tuple
 
 from Bio.Align import PairwiseAligner
 from primerblast_oss.caps import ENZYME_METADATA, caps_scan
+from .experiments import GelProfile, assess_gel
 
 MAX_SEQUENCE_LENGTH = 8000
 IUPAC = frozenset("ACGTRYSWKMBDHVN")
@@ -164,6 +165,7 @@ def scan_caps(
     b: str,
     enzymes: Sequence[str],
     min_gap: int = 25,
+    profile: GelProfile | None = None,
 ) -> List[dict]:
     """Simulate restriction of the *supplied* molecules, not hypothetical PCR.
 
@@ -176,11 +178,22 @@ def scan_caps(
     if unknown:
         raise ValueError("未対応またはPCRに適さない酵素: " + ", ".join(sorted(unknown)))
     selected = {name: ENZYME_METADATA[name] for name in enzymes}
-    candidates = caps_scan(a, b, enzymes=selected, gel_min_gap=min_gap)
+    profile = profile or GelProfile()
+    profile.validate()
+    candidates = caps_scan(
+        a, b, enzymes=selected, gel_min_gap=min_gap,
+        ladder=profile.ladder,
+        custom_ladder_bands=profile.custom_bands or None,
+        gel_percent=profile.gel_percent,
+    )
     rows = []
     for result in candidates:
+        if not result.allele_a_cuts and not result.allele_b_cuts:
+            continue  # length-only InDel, not a restriction-based CAPS marker
         gap = result.min_gel_gap
-        gel = result.gel_analysis or {}
+        gel = assess_gel(
+            result.allele_a_fragments, result.allele_b_fragments, profile,
+        )
         hetero = gel.get("heterozygote_bands") or []
         hetero_sizes = [
             int(band["size"])
@@ -204,13 +217,20 @@ def scan_caps(
             "A断片(bp)": _format_fragments(result.allele_a_fragments),
             "B断片(bp)": _format_fragments(result.allele_b_fragments),
             "AB断片(bp)": _format_fragments(hetero_sizes),
-            "マーカー型": marker_classification(gel),
+            "マーカー型": gel["marker_type"],
+            "実験適合スコア": gel["utility_score"],
             "最大バンド差(bp)": gap,
             "最小断片(bp)": min(result.allele_a_fragments + result.allele_b_fragments),
-            "ゲル判別": "可能" if result.distinguishable else "要検討",
+            "ゲル判別": (
+                "可能" if result.recommendation_eligible
+                and gel["marker_type"] != "判別困難" else "要検討"
+            ),
             "認識サイト数の差": len(result.allele_a_cuts) != len(result.allele_b_cuts),
             "ゲル評価": round(float(gel.get("score") or 0), 2),
             "推奨ゲル濃度(%)": gel.get("gel_percent", ""),
+            "ラダー": gel.get("ladder", ""),
+            "可視断片範囲(bp)": "-".join(map(str, gel["visible_range_bp"])),
+            "可視識別断片下限(bp)": gel.get("min_diagnostic_visible_bp") or "",
             "ゲル注意": "; ".join(
                 reason for reason in gel.get("reasons", [])
                 if any(word in reason for word in ("below", "outside", "penalty"))
