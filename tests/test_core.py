@@ -12,6 +12,7 @@ from caps_maker.core import (
 def test_one_record_fasta_and_bare_sequence():
     assert parse_sequence(">A description\nacgt\nTT\n").sequence == "ACGTTT"
     assert parse_sequence("acgt\n").sequence == "ACGT"
+    assert parse_sequence(">\nACGT\n").name == "sequence"
 
 
 def test_multiple_records_rejected():
@@ -50,6 +51,10 @@ def test_caps_eco_ri_and_enzyme_selection():
     assert row["認識サイト数の差"]
     assert row["A切断部位数"] == 1
     assert row["B切断部位数"] == 0
+    assert row["切断アレル"] == "Aのみ"
+    assert row["AB断片(bp)"]
+    assert row["マーカー型"].startswith("共優性")
+    assert row["最小断片(bp)"] > 0
 
 
 def test_csv_excel_and_tsv_roundtrip():
