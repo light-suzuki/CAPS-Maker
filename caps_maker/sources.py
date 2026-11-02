@@ -42,6 +42,8 @@ class LocusWindow:
     ref_to_a: Dict[int, Optional[int]]
     ref_to_b: Dict[int, Optional[int]]
     variants: List[SampleVariant]
+    source_kind: str = ""
+    source_locator: str = ""
 
     def inverse(self, allele: str) -> Dict[int, int]:
         mapping = self.ref_to_a if allele.upper() == "A" else self.ref_to_b
@@ -213,6 +215,9 @@ def construct_window(chrom: str, start: int, reference: str,
 
 def source_window(source: str, locator: str, chrom: str, start: int, end: int,
                   variants: Sequence[SampleVariant]) -> LocusWindow:
-    return construct_window(
+    window = construct_window(
         chrom, start, fetch_reference(source, locator, chrom, start, end),
         variants)
+    window.source_kind = source
+    window.source_locator = locator
+    return window
