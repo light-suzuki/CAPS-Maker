@@ -44,6 +44,35 @@ def primer_intervals(template: str, forward: str, reverse: str,
     return sorted(set(intervals))
 
 
+
+def locate_reference_product(
+    forward: str, reverse: str, databases: Sequence[str],
+    chrom: str, interval_start: int, interval_end: int,
+    max_product: int = 10000,
+) -> Tuple[Tuple[int, int], Sequence[dict]]:
+    """Find one F/R product from a complete BLAST search in a reference interval."""
+    if not databases:
+        raise ValueError("標的座位の検索にはBLAST DBが必要です。")
+    evidence = run_primer_check(forward.upper(), reverse.upper(), databases,
+                                max_product=max_product)
+    primary = evidence[0]
+    if primary.get("search_completeness") != "complete":
+        raise ValueError("BLAST探索が不完全です。ヒット数上限を上げてください。")
+    matches = []
+    for product in primary.get("products") or []:
+        start, end = sorted((int(product["start"]), int(product["end"])))
+        if (product.get("subject") == chrom
+                and product.get("orientation") == "F/R"
+                and start >= interval_start and end <= interval_end):
+            matches.append((start, end))
+    matches = sorted(set(matches))
+    if len(matches) != 1:
+        raise ValueError(
+            f"指定区間内でプライマーの予測PCR産物は{len(matches)}件です。"
+            "一意の区間に絞るか、プライマーの向きと配列を確認してください。")
+    return matches[0], evidence
+
+
 def analyze_primers(
     a: str, b: str, alignment: AlleleAlignment,
     forward: str, reverse: str,
@@ -54,6 +83,7 @@ def analyze_primers(
     gel_profile: Optional[GelProfile] = None,
     specificity_policy: str = "strict",
     window=None,
+    check_evidence: Optional[Sequence[dict]] = None,
 ) -> Tuple[List[dict], dict]:
     from .primers import _amplicons_for_pair
 
@@ -78,7 +108,7 @@ def analyze_primers(
         raise ValueError("配列Bで両方のプライマーの完全一致結合が確認できません。"
                          "少なくとも片方のプライマーが多型に重なっています。")
     seq_a, seq_b = products
-    results = run_primer_check(
+    results = check_evidence if check_evidence is not None else run_primer_check(
         forward.upper(), reverse.upper(), databases,
         max_product=max(10000, max_bp + 3000),
     )
