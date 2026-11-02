@@ -112,6 +112,7 @@ def design_caps(
     window=None,
     genome_fasta_by_db: dict | None = None,
     max_dcaps_per_pair: int = 4,
+    max_dcaps_parent_pairs: int = 2,
 ) -> Tuple[List[dict], dict]:
     """Design allele-shared CAPS; optionally generate dCAPS with new BLAST checks.
 
@@ -201,8 +202,10 @@ def design_caps(
                 fasta_by_db=genome_fasta_by_db,
             ))
 
-        if (dcaps_mode == "always" or
-                (dcaps_mode == "fallback" and not digests)):
+        useful_caps = any(d.get("ゲル判別") == "可能" for d in digests)
+        if mapped <= max_dcaps_parent_pairs and (
+                dcaps_mode == "always" or
+                (dcaps_mode == "fallback" and not useful_caps)):
             candidates = design_dcaps_for_pair(
                 a, b, alignment, variant, pair, enzymes, min_gap=min_gap,
                 max_mismatches=dcaps_max_mismatches,
