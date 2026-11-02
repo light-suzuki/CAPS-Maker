@@ -88,9 +88,10 @@ def assess_gel(fragments_a: Sequence[int], fragments_b: Sequence[int],
     elif aa_bb:
         if aa_ab and not ab_bb:
             kind = "優性型（ABとBBが同じ）"
-        if not aa_ab and ab_bb:
+        elif not aa_ab and ab_bb:
             kind = "優性型（AAとABが同じ）"
-        kind = "2群識別（ヘテロ判別不可）"
+        else:
+            kind = "2群識別（ヘテロ判別不可）"
     else:
         kind = "判別困難"
 
