@@ -130,6 +130,34 @@ def available_enzymes() -> List[str]:
     )
 
 
+def _format_fragments(sizes: Sequence[int]) -> str:
+    """Preserve co-migrating fragments as multiplicities (e.g. 200×2)."""
+    from collections import Counter
+
+    counts = Counter(int(size) for size in sizes)
+    return " + ".join(
+        f"{size}×{count}" if count > 1 else str(size)
+        for size, count in sorted(counts.items(), reverse=True)
+    )
+
+
+def marker_classification(gel_analysis: dict) -> str:
+    """Classify visible genotyping patterns; not biological dominance."""
+    comparisons = (gel_analysis.get("genotype_discrimination") or {}).get("comparisons") or {}
+    aa_ab = bool((comparisons.get("AA_vs_AB") or {}).get("distinguishable"))
+    aa_bb = bool((comparisons.get("AA_vs_BB") or {}).get("distinguishable"))
+    ab_bb = bool((comparisons.get("AB_vs_BB") or {}).get("distinguishable"))
+    if aa_ab and ab_bb and aa_bb:
+        return "共優性（3遺伝子型を識別）"
+    if aa_bb:
+        if not aa_ab and ab_bb:
+            return "優性型（AAとABが同じ）"
+        if aa_ab and not ab_bb:
+            return "優性型（ABとBBが同じ）"
+        return "2群識別（ヘテロ判別不可）"
+    return "判別困難"
+
+
 def scan_caps(
     a: str,
     b: str,
@@ -151,17 +179,41 @@ def scan_caps(
     rows = []
     for result in candidates:
         gap = result.min_gel_gap
+        gel = result.gel_analysis or {}
+        hetero = gel.get("heterozygote_bands") or []
+        hetero_sizes = [
+            int(band["size"])
+            for band in hetero
+            for _ in range(int(band.get("copies", 1)))
+        ]
+        cut_a = bool(result.allele_a_cuts)
+        cut_b = bool(result.allele_b_cuts)
+        cut_allele = (
+            "Aのみ" if cut_a and not cut_b
+            else "Bのみ" if cut_b and not cut_a
+            else "A・B両方" if cut_a and cut_b
+            else "切断なし"
+        )
         rows.append({
             "酵素": result.enzyme,
             "認識配列": result.recognition,
+            "切断アレル": cut_allele,
             "A切断部位数": len(result.allele_a_cuts),
             "B切断部位数": len(result.allele_b_cuts),
-            "A断片(bp)": " + ".join(map(str, result.allele_a_fragments)),
-            "B断片(bp)": " + ".join(map(str, result.allele_b_fragments)),
+            "A断片(bp)": _format_fragments(result.allele_a_fragments),
+            "B断片(bp)": _format_fragments(result.allele_b_fragments),
+            "AB断片(bp)": _format_fragments(hetero_sizes),
+            "マーカー型": marker_classification(gel),
             "最大バンド差(bp)": gap,
+            "最小断片(bp)": min(result.allele_a_fragments + result.allele_b_fragments),
             "ゲル判別": "可能" if result.distinguishable else "要検討",
             "認識サイト数の差": len(result.allele_a_cuts) != len(result.allele_b_cuts),
-            "ゲル評価": round(float((result.gel_analysis or {}).get("score") or 0), 2),
+            "ゲル評価": round(float(gel.get("score") or 0), 2),
+            "推奨ゲル濃度(%)": gel.get("gel_percent", ""),
+            "ゲル注意": "; ".join(
+                reason for reason in gel.get("reasons", [])
+                if any(word in reason for word in ("below", "outside", "penalty"))
+            ),
             "備考": result.note,
         })
     return rows
