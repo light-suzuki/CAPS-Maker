@@ -106,6 +106,7 @@ def design_caps(
         for digest in digests:
             rows.append({
                 "順位": rank,
+                "標的多型": variant.label,
                 "Forward(5'-3')": pair["forward"],
                 "Reverse(5'-3')": pair["reverse"],
                 "Tm F(°C)": round(float(pair["tm_f"]), 1),
