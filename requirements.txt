@@ -1,0 +1,4 @@
+streamlit>=1.35,<2
+pandas>=2.0,<3
+biopython>=1.83,<2
+primerblast-oss @ git+https://github.com/light-suzuki/primerblast-oss.git@652464b66032183a25b92474afa9d6ad3e4bfb37
