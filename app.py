@@ -191,6 +191,26 @@ if "caps_rows" in st.session_state:
                     file_name="caps_maker_results.tsv",
                     mime="text/tab-separated-values",
                 )
+            if st.session_state.caps_result_mode == "Primer-BLAST付きマーカー設計":
+                order_rows = []
+                ordered = set()
+                for row in visible_rows:
+                    forward, reverse = row["Forward(5'-3')"], row["Reverse(5'-3')"]
+                    if (forward, reverse) in ordered:
+                        continue
+                    ordered.add((forward, reverse))
+                    pair_no = len(order_rows) // 2 + 1
+                    order_rows.extend([
+                        {"Primer ID": f"CAPS_{pair_no:03d}_F", "Sequence (5'-3')": forward,
+                         "Tm (°C)": row["Tm F(°C)"], "Direction": "Forward"},
+                        {"Primer ID": f"CAPS_{pair_no:03d}_R", "Sequence (5'-3')": reverse,
+                         "Tm (°C)": row["Tm R(°C)"], "Direction": "Reverse"},
+                    ])
+                st.download_button(
+                    "プライマー発注表（CSV）",
+                    data=table_bytes(order_rows),
+                    file_name="caps_maker_primer_order.csv", mime="text/csv",
+                )
 
             st.markdown("#### AA / AB / BB の予測ゲル")
             selected_row_index = st.selectbox(
