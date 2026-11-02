@@ -6,6 +6,8 @@ import hashlib
 import pandas as pd
 import streamlit as st
 
+from primerblast_oss.gel import analyze_digest_patterns, virtual_gel_svg
+
 from caps_maker.core import (
     align_alleles, available_enzymes, parse_sequence, scan_caps, table_bytes,
 )
@@ -129,6 +131,7 @@ if run:
                     product_min=int(product_min), product_max=int(product_max),
                     num_pairs=int(num_pairs), min_gap=int(gel_min_gap)
                 )
+        st.session_state.caps_result_mode = mode
         st.session_state.caps_rows = rows
         st.session_state.caps_summary = summary
         st.session_state.caps_signature = signature
@@ -169,23 +172,61 @@ if "caps_rows" in st.session_state:
             and (not site_count_only or row["認識サイト数の差"])
         ]
         st.caption(f"表示 {len(visible_rows)} / 全 {len(original_rows)} 件")
-        st.dataframe(pd.DataFrame(visible_rows or original_rows),
+        st.dataframe(pd.DataFrame(visible_rows, columns=list(original_rows[0])),
                      use_container_width=True, hide_index=True)
         if not visible_rows:
-            st.info("フィルターに一致する候補がないため、上の表には全候補を表示しています。")
-        dl1, dl2 = st.columns(2)
-        with dl1:
-            st.download_button(
-                "表をCSVでダウンロード（Excel対応）",
-                data=table_bytes(visible_rows or original_rows),
-                file_name="caps_maker_results.csv", mime="text/csv",
+            st.info("現在のフィルターに一致する候補はありません。")
+        else:
+            dl1, dl2 = st.columns(2)
+            with dl1:
+                st.download_button(
+                    "表をCSVでダウンロード（Excel対応）",
+                    data=table_bytes(visible_rows),
+                    file_name="caps_maker_results.csv", mime="text/csv",
+                )
+            with dl2:
+                st.download_button(
+                    "表をTSVでダウンロード",
+                    data=table_bytes(visible_rows, "\t"),
+                    file_name="caps_maker_results.tsv",
+                    mime="text/tab-separated-values",
+                )
+
+            st.markdown("#### AA / AB / BB の予測ゲル")
+            selected_row_index = st.selectbox(
+                "ゲル画像に表示する候補",
+                list(range(len(visible_rows))),
+                format_func=lambda index: (
+                    f"{index + 1}. {visible_rows[index]['酵素']} "
+                    f"({visible_rows[index]['マーカー型']}; "
+                    f"評価 {visible_rows[index]['ゲル評価']})"
+                ),
             )
-        with dl2:
-            st.download_button(
-                "表をTSVでダウンロード",
-                data=table_bytes(visible_rows or original_rows, "\t"),
-                file_name="caps_maker_results.tsv",
-                mime="text/tab-separated-values",
+            selected_row = visible_rows[selected_row_index]
+
+            def expand_bands(bands):
+                lengths = []
+                for token in bands.split(" + "):
+                    if "×" in token:
+                        size, count = token.split("×")
+                        lengths.extend([int(size)] * int(count))
+                    else:
+                        lengths.append(int(token))
+                return lengths
+
+            gel = analyze_digest_patterns(
+                expand_bands(selected_row["A断片(bp)"]),
+                expand_bands(selected_row["B断片(bp)"]),
+            )
+            svg = virtual_gel_svg(gel)
+            st.image(svg, width=520,
+                     caption="M（サイズマーカー）、AA、AB、BB。予測された標的断片のみ。")
+            st.download_button("予測ゲルをSVGで保存", data=svg,
+                               file_name="caps_maker_gel.svg",
+                               mime="image/svg+xml")
+            st.caption(
+                "このゲルは完全消化・両アレルの増幅を仮定します。"
+                "オフターゲットPCR産物の切断断片は重ねていません。"
             )
         with st.expander("解析の注意点"):
             st.markdown(
