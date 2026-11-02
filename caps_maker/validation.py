@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from functools import lru_cache
 from typing import Dict, Optional, Sequence, Tuple
 
 from .experiments import GelProfile, off_target_verdict
@@ -47,6 +48,12 @@ def run_primer_check(forward: str, reverse: str, databases: Sequence[str],
         raise RuntimeError("PrimerBlastOssの特異性レポートが不正です。") from exc
 
 
+@lru_cache(maxsize=128)
+def _reference_segment_in_db(db: str, chrom: str, start: int, end: int) -> str:
+    from .sources import fetch_reference
+    return fetch_reference("BLAST DB", db, chrom, start, end)
+
+
 def gel_specificity(
     *,
     evidence: Sequence[dict],
@@ -62,6 +69,23 @@ def gel_specificity(
     genome_fasta_by_db: Optional[Dict[str, str]] = None,
 ) -> Dict:
     anchor = reference_anchor(reference, left, right)
+    if reference is not None and databases and reference.source_kind:
+        try:
+            db_reference = _reference_segment_in_db(
+                databases[0], reference.chrom, reference.start, reference.end)
+        except (OSError, ValueError, RuntimeError) as exc:
+            return {
+                "status": "primary_reference_unverifiable",
+                "accepted": False,
+                "note": "設計座標とBLAST DBが同じアセンブリか照合できません: " + str(exc),
+            }
+        if db_reference != reference.reference:
+            return {
+                "status": "primary_reference_mismatch",
+                "accepted": False,
+                "note": "最初のBLAST DBと参照FASTA/BLAST配列が一致しません。"
+                        "同じアセンブリから作成したDBを指定してください。",
+            }
     if not anchor:
         return {
             "status": "no_reference_anchor",
