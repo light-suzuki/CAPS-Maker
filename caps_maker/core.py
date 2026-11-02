@@ -61,7 +61,8 @@ def parse_sequence(text: str) -> SequenceRecord:
             if line.startswith(">"):
                 if name is not None:
                     records.append((name, "".join(parts)))
-                name = line[1:].strip().split()[0] or "sequence"
+                header = line[1:].strip().split()
+                name = header[0] if header else "sequence"
                 parts = []
             elif name is None:
                 raise ValueError("FASTAヘッダーの前に配列があります。")
