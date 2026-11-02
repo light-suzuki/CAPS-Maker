@@ -122,6 +122,8 @@ def design_dcaps_for_pair(
         for digest in digests:
             results.append({
                 "設計方式": "dCAPS",
+                "_left_start": left,
+                "_right_start": right,
                 "標的多型": variant.label,
                 "Forward(5'-3')": actual_f,
                 "Reverse(5'-3')": actual_r,
