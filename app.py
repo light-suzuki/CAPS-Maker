@@ -206,7 +206,8 @@ with st.sidebar:
             "strict" if specificity_choice.startswith("厳密") else "gel-tolerant"
         )
         dcaps_choice = st.radio(
-            "dCAPS探索", ["CAPSのみ", "CAPSが使えなければdCAPS", "CAPS/dCAPS両方"]
+            "dCAPS探索", ["CAPSのみ", "CAPSが使えなければdCAPS", "CAPS/dCAPS両方"],
+            index=1,
         )
         dcaps_mode = {
             "CAPSのみ": "none",
@@ -533,6 +534,9 @@ if run_mode == "区間マーカーを一括設計" and source_args:
 
 if "caps_results" in st.session_state:
     if run_mode == st.session_state.get("caps_result_mode"):
+        if run_mode != "区間マーカーを一括設計":
+            if st.session_state.get("caps_signature") != signature:
+                st.warning("表示されているのは前の条件での結果です。再解析してください。")
         summary = st.session_state.get("caps_summary") or {}
         with st.expander("実行サマリー・未成功サイト", expanded=False):
             st.json(summary)
