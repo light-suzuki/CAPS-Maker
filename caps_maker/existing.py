@@ -45,31 +45,77 @@ def primer_intervals(template: str, forward: str, reverse: str,
 
 
 
+def product_table(evidence: Sequence[dict],
+                  target: Optional[Tuple[str, int, int]] = None) -> List[Dict]:
+    """Every predicted PCR product in every DB, intended one flagged.
+
+    ``target`` is (chrom, start, end) on the first (design) DB, 1-based.
+    """
+    rows = []
+    for index, record in enumerate(evidence):
+        for product in record.get("products") or []:
+            start, end = sorted((int(product["start"]), int(product["end"])))
+            intended = bool(
+                target is not None and index == 0
+                and product.get("subject") == target[0]
+                # Same tolerance as experiments.off_target_verdict.
+                and abs(start - target[1]) <= 10 and abs(end - target[2]) <= 10
+                and product.get("orientation") in ("F/R", "R/F"))
+            rows.append({
+                "DB": record.get("db"),
+                "配列ID": product.get("subject"),
+                "開始(1-based)": start,
+                "終了(1-based)": end,
+                "産物長(bp)": int(product.get("size") or end - start + 1),
+                "向き": product.get("orientation"),
+                "区分": "標的産物" if intended else "その他の産物",
+                "探索完全性": record.get("search_completeness", "unknown"),
+            })
+    rows.sort(key=lambda r: (r["区分"] != "標的産物", str(r["DB"]),
+                             str(r["配列ID"]), r["開始(1-based)"]))
+    return rows
+
+
+class AmbiguousProductError(ValueError):
+    """Raised when the intended locus cannot be chosen; carries all products."""
+
+    def __init__(self, message: str, products: List[Dict]):
+        super().__init__(message)
+        self.products = products
+
+
 def locate_reference_product(
     forward: str, reverse: str, databases: Sequence[str],
     chrom: str, interval_start: int, interval_end: int,
     max_product: int = 10000,
 ) -> Tuple[Tuple[int, int], Sequence[dict]]:
-    """Find one F/R product from a complete BLAST search in a reference interval."""
+    """Confirm exactly one F/R product inside the reference interval.
+
+    The intended product is confirmed *before* any digestion. When it cannot be
+    resolved, the error carries every predicted product for the user to inspect.
+    """
     if not databases:
         raise ValueError("標的座位の検索にはBLAST DBが必要です。")
     evidence = run_primer_check(forward.upper(), reverse.upper(), databases,
                                 max_product=max_product)
     primary = evidence[0]
     if primary.get("search_completeness") != "complete":
-        raise ValueError("BLAST探索が不完全です。ヒット数上限を上げてください。")
+        raise AmbiguousProductError(
+            "BLAST探索が不完全です。ヒット数上限を上げてください。",
+            product_table(evidence))
     matches = []
     for product in primary.get("products") or []:
         start, end = sorted((int(product["start"]), int(product["end"])))
         if (product.get("subject") == chrom
-                and product.get("orientation") == "F/R"
+                and product.get("orientation") in ("F/R", "R/F")
                 and start >= interval_start and end <= interval_end):
             matches.append((start, end))
     matches = sorted(set(matches))
     if len(matches) != 1:
-        raise ValueError(
+        raise AmbiguousProductError(
             f"指定区間内でプライマーの予測PCR産物は{len(matches)}件です。"
-            "一意の区間に絞るか、プライマーの向きと配列を確認してください。")
+            "一意の区間に絞るか、プライマーの向きと配列を確認してください。",
+            product_table(evidence))
     return matches[0], evidence
 
 
@@ -112,9 +158,11 @@ def analyze_primers(
         forward.upper(), reverse.upper(), databases,
         max_product=max(10000, max_bp + 3000),
     )
+    from .primers import apply_verdict
+    from .validation import parse_fragment_column, reference_anchor
+
     rows = scan_caps(seq_a, seq_b, enzymes, min_gap, profile=gel_profile)
     for row in rows:
-        from .validation import parse_fragment_column
         verdict = gel_specificity(
             evidence=results, databases=databases, reference=window,
             left=left, right=right, forward=forward.upper(),
@@ -123,7 +171,6 @@ def analyze_primers(
             fragments_b=parse_fragment_column(row["B断片(bp)"]),
             gel_profile=gel_profile, policy=specificity_policy,
         )
-        good = bool(verdict["accepted"]) and row["ゲル判別"] == "可能"
         row.update({
             "設計方式": "既存プライマー",
             "Forward(5'-3')": forward.upper(),
@@ -132,15 +179,16 @@ def analyze_primers(
             "B産物(bp)": len(seq_b),
             "Tm F(°C)": _tm(forward),
             "Tm R(°C)": _tm(reverse),
-            "特異性判定": verdict["status"],
-            "参照検証採用可": good,
-            "総合設計スコア": round(
-                0.8 * float(row["実験適合スコア"]) + (20 if good else 0), 1),
         })
+        apply_verdict(row, verdict, window, left, right)
     rows.sort(key=lambda x: (not x["参照検証採用可"], -x["総合設計スコア"]))
+    anchor = reference_anchor(window, left, right)
+    target = (anchor[0], anchor[1][0], anchor[1][1]) if anchor else None
     return rows, {
         "n_existing_pairs": 1,
         "caps_candidates": len(rows),
         "amplicon_start_a": left + 1,
         "amplicon_end_a": right + 1,
+        "intended_product_confirmed": target is not None,
+        "all_products": product_table(results, target),
     }

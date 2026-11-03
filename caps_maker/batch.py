@@ -7,10 +7,11 @@ table is a *planning* view; final bands must be computed on designed amplicons.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from html import escape
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from primerblast_oss.caps import (
-    ENZYME_METADATA, caps_scan, dcaps_candidates, enzyme_records,
+    ENZYME_METADATA, caps_scan, dcaps_candidates,
 )
 from .sources import SampleVariant, source_window
 
@@ -132,46 +133,179 @@ def discover_sites(source: str, locator: str, chrom: str,
     }
 
 
+PANEL_MODES = ("全酵素サイト", "一定間隔", "指定本数")
+
+
+def _locus_key(site: MarkerSite) -> Tuple[str, str]:
+    """One polymorphism is one map marker, whatever the enzyme options."""
+    return site.chrom, site.source_variant
+
+
+def group_by_locus(sites: Sequence[MarkerSite]) -> List[Dict]:
+    """Collapse enzyme/CAPS/dCAPS options at one polymorphism into one locus."""
+    groups: Dict[Tuple[str, str], List[MarkerSite]] = {}
+    for site in sites:
+        groups.setdefault(_locus_key(site), []).append(site)
+    loci = []
+    for (chrom, variant), options in groups.items():
+        options = sorted(options, key=lambda s: (
+            0 if s.kind == "CAPS" else 1, s.enzyme, s.site_position))
+        loci.append({
+            "chrom": chrom,
+            "variant": variant,
+            "position": options[0].position,
+            "options": options,
+            "has_caps": any(s.kind == "CAPS" for s in options),
+        })
+    loci.sort(key=lambda item: (item["chrom"], item["position"], item["variant"]))
+    return loci
+
+
 def choose_sites(sites: Sequence[MarkerSite], mode: str,
                  region_start: int, region_end: int,
                  spacing_bp: int = 10000,
                  target_count: int = 20,
-                 limit: int = 100) -> Tuple[List[MarkerSite], Dict]:
+                 limit: int = 100,
+                 min_spacing_bp: int = 0,
+                 search_radius_bp: Optional[int] = None,
+                 scores: Optional[Dict[str, float]] = None,
+                 ) -> Tuple[List[MarkerSite], Dict]:
+    """Select a marker panel without inventing markers for empty bins.
+
+    Grid modes pick at most one *polymorphic locus* per bin (enzyme options at
+    the same variant are alternatives, not independent map markers), honour a
+    minimum physical spacing between selected loci and a search radius around
+    each bin centre, and report every uncovered bin with its reason.
+    """
     if region_end < region_start or limit < 1:
         raise ValueError("区間または設計上限が不正です。")
-    if mode not in ("全酵素サイト", "一定間隔", "指定本数"):
+    if mode not in PANEL_MODES:
         raise ValueError("マーカーパネルの設計方式が不明です。")
     if spacing_bp < 1 or target_count < 1:
         raise ValueError("間隔と目標本数は正の整数にしてください。")
+    if min_spacing_bp < 0 or (search_radius_bp is not None and search_radius_bp < 0):
+        raise ValueError("最小間隔と探索半径は0以上にしてください。")
+    scores = scores or {}
     total = region_end - region_start + 1
-    width = spacing_bp if mode == "一定間隔" else max(1, (total + target_count - 1) // target_count)
+    inside = [s for s in sites if region_start <= s.position <= region_end]
+    loci = group_by_locus(inside)
+
+    def rank(site: MarkerSite, centre: float) -> Tuple:
+        # CAPS avoids engineered mismatches; then assay score; then centrality.
+        return (0 if site.kind == "CAPS" else 1,
+                -float(scores.get(site.identifier, 0.0)),
+                abs(site.position - centre), site.enzyme, site.site_position)
+
     if mode == "全酵素サイト":
-        chosen = list(sites)
-    else:
-        grouped: Dict[int, List[MarkerSite]] = {}
-        for site in sites:
-            bucket = (site.site_position - region_start) // width
-            if bucket < 0:
+        kept: List[MarkerSite] = []
+        last = None
+        for locus in loci:
+            if (min_spacing_bp and last is not None
+                    and locus["position"] - last < min_spacing_bp):
                 continue
-            grouped.setdefault(bucket, []).append(site)
-        chosen = []
-        for bucket, options in sorted(grouped.items()):
-            middle = region_start + bucket * width + width // 2
-            # CAPS generally avoids engineered mismatches and is preferred.
-            selected = min(
-                options, key=lambda site: (
-                    0 if site.kind == "CAPS" else 1,
-                    abs(site.site_position - middle),
-                    site.enzyme,
-                )
-            )
-            chosen.append(selected)
-    chosen.sort(key=lambda site: (site.site_position, site.enzyme, site.kind))
-    return chosen[:limit], {
+            last = locus["position"]
+            kept.extend(locus["options"])
+        chosen = sorted(kept, key=lambda s: (s.position, s.site_position,
+                                             s.enzyme, s.kind))
+        selected = chosen[:limit]
+        return selected, {
+            "discovered": len(sites),
+            "loci": len(loci),
+            "panel_candidates": len(chosen),
+            "selected": len(selected),
+            "selected_loci": len({_locus_key(s) for s in selected}),
+            "truncated": len(chosen) > limit,
+            "spacing_bp": None,
+            "min_spacing_bp": min_spacing_bp,
+            "uncovered_bins": [],
+            "notice": "Exhaustive mode lists every enzyme option; "
+                      "count loci, not rows, as map markers.",
+        }
+
+    width = spacing_bp if mode == "一定間隔" else max(1, -(-total // target_count))
+    n_bins = -(-total // width)
+    by_bin: Dict[int, List[Dict]] = {}
+    for locus in loci:
+        by_bin.setdefault((locus["position"] - region_start) // width, []).append(locus)
+
+    chosen: List[MarkerSite] = []
+    taken: List[int] = []
+    uncovered = []
+    for index in range(n_bins):
+        bin_start = region_start + index * width
+        bin_end = min(region_end, bin_start + width - 1)
+        centre = (bin_start + bin_end) / 2
+        options = by_bin.get(index, [])
+        reason = None
+        if not options:
+            reason = "多型サイトなし"
+        elif search_radius_bp is not None:
+            options = [l for l in options
+                       if abs(l["position"] - centre) <= search_radius_bp]
+            if not options:
+                reason = "探索半径内にサイトなし"
+        if reason is None:
+            options = [l for l in options
+                       if all(abs(l["position"] - p) >= min_spacing_bp for p in taken)]
+            if not options:
+                reason = "最小間隔の制約で選択不可"
+        if reason is not None:
+            uncovered.append({"bin": index + 1, "start": bin_start,
+                              "end": bin_end, "reason": reason})
+            continue
+        best = min((min(l["options"], key=lambda s: rank(s, centre)) for l in options),
+                   key=lambda s: rank(s, centre))
+        chosen.append(best)
+        taken.append(best.position)
+    chosen.sort(key=lambda site: (site.position, site.enzyme, site.kind))
+    selected = chosen[:limit]
+    return selected, {
         "discovered": len(sites),
+        "loci": len(loci),
         "panel_candidates": len(chosen),
-        "selected": min(len(chosen), limit),
+        "selected": len(selected),
+        "selected_loci": len(selected),
         "truncated": len(chosen) > limit,
-        "spacing_bp": width if mode != "全酵素サイト" else None,
+        "spacing_bp": width,
+        "bins": n_bins,
+        "min_spacing_bp": min_spacing_bp,
+        "search_radius_bp": search_radius_bp,
+        "uncovered_bins": uncovered,
         "notice": "No extra markers are invented for bins with zero assayable sites.",
     }
+
+
+def marker_track_svg(sites: Sequence[MarkerSite], region_start: int,
+                     region_end: int, uncovered: Sequence[Dict] = (),
+                     width: int = 900) -> str:
+    """Physical marker track: selected loci as ticks, uncovered bins shaded."""
+    span = max(1, region_end - region_start)
+    left, right = 20, width - 20
+
+    def x(pos: float) -> float:
+        return left + (pos - region_start) / span * (right - left)
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="90" '
+        f'viewBox="0 0 {width} 90" font-family="sans-serif" font-size="11">',
+        '<rect width="100%" height="100%" fill="white"/>',
+    ]
+    for item in uncovered:
+        x0, x1 = x(item["start"]), x(item["end"])
+        parts.append(
+            f'<rect x="{x0:.1f}" y="30" width="{max(1.0, x1 - x0):.1f}" height="20" '
+            f'fill="#f3d6d6"><title>{escape(str(item["reason"]))}</title></rect>')
+    parts.append(f'<line x1="{left}" y1="40" x2="{right}" y2="40" '
+                 'stroke="#333" stroke-width="2"/>')
+    for site in sites:
+        colour = "#2f6f4f" if site.kind == "CAPS" else "#b5651d"
+        px = x(site.position)
+        parts.append(
+            f'<line x1="{px:.1f}" y1="26" x2="{px:.1f}" y2="54" stroke="{colour}" '
+            f'stroke-width="2"><title>{escape(site.identifier)}</title></line>')
+    parts.append(f'<text x="{left}" y="72">{region_start:,}</text>')
+    parts.append(f'<text x="{right}" y="72" text-anchor="end">{region_end:,}</text>')
+    parts.append(f'<text x="{left}" y="16">緑=CAPS 橙=dCAPS 赤帯=未カバー区画'
+                 f'（{len(sites)}マーカー）</text>')
+    parts.append("</svg>")
+    return "".join(parts)

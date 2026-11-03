@@ -121,6 +121,24 @@ def assess_gel(fragments_a: Sequence[int], fragments_b: Sequence[int],
     return standard
 
 
+SPECIFICITY_CLASSES = {
+    "strict_pass": "A 厳密合格",
+    "gel_tolerant_pass": "B ゲル判別で合格（副産物あり）",
+    "not_strict": "C 不合格（副産物あり）",
+    "gel_not_resolvable": "C 不合格（副産物とバンドが重なる）",
+    "target_not_unique": "C 不合格（標的産物が一意でない）",
+    "indeterminate": "D 判定不能（探索不完全・座標不明）",
+    "no_reference_anchor": "D 判定不能（参照座標なし）",
+    "primary_reference_mismatch": "D 判定不能（参照とDBが不一致）",
+    "primary_reference_unverifiable": "D 判定不能（参照とDBを照合不可）",
+}
+
+
+def specificity_class(status: str) -> str:
+    """Keep strict and gel-tolerant acceptance visibly distinct (A/B/C/D)."""
+    return SPECIFICITY_CLASSES.get(status, "D 判定不能（" + str(status) + "）")
+
+
 def off_target_verdict(
     *,
     rows_by_db: Sequence[Dict],
@@ -146,6 +164,7 @@ def off_target_verdict(
     from primerblast_oss.amplicon_digest import digest_offtarget_products
 
     profile.validate()
+    located = target_chrom is not None and target_interval is not None
     details = []
     for record in rows_by_db:
         products = list(record.get("products") or [])
@@ -164,7 +183,6 @@ def off_target_verdict(
                 observed.append(p)
             else:
                 background.append({**p, "on_target": False})
-        located = target_chrom is not None and target_interval is not None
         unique_locus = located and len(observed) == 1
         complete = record.get("search_completeness") == "complete" and record.get("search_complete") is True
         entry = {
@@ -181,11 +199,18 @@ def off_target_verdict(
     if clean:
         return {"status": "strict_pass", "accepted": True, "background_bands": 0,
                 "per_db": details}
+    # An incomplete search or an unlocated target can neither pass nor fail:
+    # absence of off-targets in a truncated search is not evidence.
+    if not details or not located or any(not i["complete"] for i in details):
+        return {"status": "indeterminate", "accepted": False,
+                "background_bands": None, "per_db": details}
+    # A complete search that misses or duplicates the intended locus amplifies
+    # a different target; no gel argument can rescue it.
+    if any(not i["unique_locus"] for i in details):
+        return {"status": "target_not_unique", "accepted": False,
+                "background_bands": None, "per_db": details}
     if policy == "strict":
         return {"status": "not_strict", "accepted": False,
-                "background_bands": None, "per_db": details}
-    if not details or any(not i["complete"] or not i["unique_locus"] for i in details):
-        return {"status": "indeterminate", "accepted": False,
                 "background_bands": None, "per_db": details}
 
     annotated = digest_offtarget_products(

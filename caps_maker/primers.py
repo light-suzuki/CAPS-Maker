@@ -79,18 +79,44 @@ def _qc_row(
         gel_profile=gel_profile, policy=specificity_policy,
         genome_fasta_by_db=fasta_by_db,
     )
+    return apply_verdict(row, verdict, window, left, right)
+
+
+def apply_verdict(row: dict, verdict: dict, window, left: int, right: int) -> dict:
+    """Attach specificity class, reference coordinates and ranking score."""
+    from .experiments import specificity_class
+    from .validation import reference_anchor
+
     accepted = bool(verdict["accepted"]) and row["ゲル判別"] == "可能"
     row["特異性判定"] = verdict["status"]
+    row["特異性区分"] = specificity_class(verdict["status"])
     row["参照検証採用可"] = accepted
     row["特異性詳細"] = verdict.get("note", "") or "; ".join(
         str(e.get("db")) + ":off=" + str(e.get("n_off_target", "?"))
+        + ("" if e.get("complete", True) else "(incomplete)")
         for e in verdict.get("per_db", [])
     )
+    anchor = reference_anchor(window, left, right)
+    if anchor:
+        row["参照染色体"] = anchor[0]
+        row["参照産物開始(1-based)"] = anchor[1][0]
+        row["参照産物終了(1-based)"] = anchor[1][1]
     score = float(row.get("実験適合スコア", 0))
-    # Not a probability. A high gel score must not override unsafe specificity.
-    row["総合設計スコア"] = round(
-        0.8 * score + (20 if accepted else 0), 1)
+    # Not a probability. A high gel score must not override unsafe specificity,
+    # and gel-tolerant acceptance never ranks level with a strict pass.
+    bonus = 0
+    if accepted:
+        bonus = 20 if verdict["status"] == "strict_pass" else 10
+    row["総合設計スコア"] = round(0.8 * score + bonus, 1)
     return row
+
+
+def _class_counts(rows: Sequence[dict]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for row in rows:
+        key = str(row.get("特異性区分", "未評価"))
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def design_caps(
@@ -250,6 +276,7 @@ def design_caps(
         "total_candidates": len(rows),
         "validated_reference_candidates": sum(
             bool(r.get("参照検証採用可")) for r in rows),
+        "specificity_classes": _class_counts(rows),
         "primer3_explain": data.get("primer3_explain", ""),
         "databases": list(databases),
         "interpretation": (
