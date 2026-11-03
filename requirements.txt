@@ -1,4 +1,4 @@
-streamlit>=1.35,<2
+streamlit>=1.50,<2
 pandas>=2.0,<3
 biopython>=1.83,<2
 pysam>=0.22,<1

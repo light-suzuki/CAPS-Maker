@@ -3,17 +3,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 from primerblast_oss.gel import virtual_gel_svg
-from caps_maker.batch import choose_sites, discover_sites
+from caps_maker.batch import choose_sites, discover_sites, marker_track_svg
 from caps_maker.core import (
     align_alleles, available_enzymes, parse_sequence, scan_caps, table_bytes,
 )
-from caps_maker.existing import analyze_primers, locate_reference_product
+from caps_maker.existing import (
+    AmbiguousProductError, analyze_primers, locate_reference_product,
+)
+from caps_maker.export import bed_bytes, build_manifest, manifest_bytes
 from caps_maker.experiments import (
     GelProfile, PROFILE_PRESETS, assess_gel, parse_custom_ladder,
 )
@@ -48,8 +52,13 @@ def show_result_table(rows: list[dict], mode: str) -> None:
     counts = {
         "総候補": len(rows),
         "ゲル判別可能": sum(r.get("ゲル判別") == "可能" for r in rows),
-        "参照特異性合格": sum(r.get("参照検証採用可") is True for r in rows),
+        "A 厳密合格": sum(str(r.get("特異性区分", "")).startswith("A") for r in rows),
+        "B ゲル判別合格": sum(str(r.get("特異性区分", "")).startswith("B") for r in rows),
+        "D 判定不能": sum(str(r.get("特異性区分", "")).startswith("D") for r in rows),
     }
+    loci = {r.get("座位ID") for r in rows if r.get("座位ID")}
+    if loci:
+        counts["座位（地図上のマーカー数）"] = len(loci)
     st.caption(" / ".join(f"{k} {v}件" for k, v in counts.items()))
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -57,15 +66,19 @@ def show_result_table(rows: list[dict], mode: str) -> None:
     with col2:
         only_codominant = st.checkbox("共優性のみ", value=False)
     with col3:
-        only_validated = st.checkbox("参照特異性合格のみ", value=False)
+        spec_filter = st.selectbox(
+            "特異性区分", ["すべて", "A 厳密合格のみ", "A＋B（採用可）"])
     visible = [
         row for row in rows
         if (not only_scored or row.get("ゲル判別") == "可能")
         and (not only_codominant or "共優性" in row.get("マーカー型", ""))
-        and (not only_validated or row.get("参照検証採用可") is True)
+        and (spec_filter == "すべて"
+             or (spec_filter.startswith("A ")
+                 and str(row.get("特異性区分", "")).startswith("A"))
+             or (spec_filter.startswith("A＋B") and row.get("参照検証採用可") is True))
     ]
     st.dataframe(pd.DataFrame(visible, columns=list(rows[0])),
-                 use_container_width=True, hide_index=True)
+                 width="stretch", hide_index=True)
     st.caption(f"{len(visible)} / {len(rows)}件を表示")
     if not visible:
         return
@@ -94,6 +107,23 @@ def show_result_table(rows: list[dict], mode: str) -> None:
                 ])
             st.download_button("プライマー発注CSV", table_bytes(order_rows),
                                "caps_maker_primer_order.csv", "text/csv")
+    download4, download5 = st.columns(2)
+    with download4:
+        bed = bed_bytes(visible)
+        if bed:
+            st.download_button("参照座標BED（産物）", bed, "caps_maker_amplicons.bed",
+                               "text/plain")
+        else:
+            st.caption("参照座標のある候補がないためBEDは出力できません。")
+    with download5:
+        manifest = build_manifest(
+            st.session_state.get("caps_config") or {"mode": mode}, visible,
+            databases=(st.session_state.get("caps_config") or {}).get("databases", []),
+            reference_files=(st.session_state.get("caps_config") or {}).get("reference_files"),
+            summary=st.session_state.get("caps_summary"),
+        )
+        st.download_button("設定・出典JSON（再現用）", manifest_bytes(manifest),
+                           "caps_maker_provenance.json", "application/json")
 
     st.markdown("#### AA / AB / BB 予測ゲル")
     choice = st.selectbox(
@@ -142,7 +172,9 @@ with st.sidebar:
         enzymes = st.multiselect("候補酵素（複数選択）",
                                  enzyme_pool, default=initial)
     else:
-        enzymes = enzyme_pool
+        excluded = st.multiselect(
+            "除外する酵素（在庫なし・高価・Star活性が強い等）", enzyme_pool)
+        enzymes = [name for name in enzyme_pool if name not in excluded]
     st.caption(f"対象 {len(enzymes)} 酵素")
 
     st.subheader("ゲル・ラダー条件")
@@ -336,6 +368,35 @@ signature = parsing_sig(
     num_pairs, dcaps_mode, max_dcaps_mismatches, specificity_policy,
     selected_variant,
 )
+run_config = {
+    "run_mode": run_mode,
+    "input_mode": input_mode,
+    "source": list(source_args) if source_args else None,
+    "sequence_sha256": {
+        "A": hashlib.sha256(raw_a.encode()).hexdigest() if raw_a else None,
+        "B": hashlib.sha256(raw_b.encode()).hexdigest() if raw_b else None,
+    },
+    "enzymes": sorted(enzymes),
+    "gel_profile": {
+        "ladder": gel_profile.ladder, "custom_bands": list(gel_profile.custom_bands),
+        "gel_percent": gel_profile.gel_percent,
+        "min_visible_bp": gel_profile.min_visible_bp,
+        "max_visible_bp": gel_profile.max_visible_bp,
+        "min_log10_gap": gel_profile.min_log10_gap,
+    },
+    "min_band_gap_bp": int(gel_min_gap),
+    "databases": databases,
+    "product_size": [int(product_min), int(product_max)],
+    "primer3_pairs": int(num_pairs),
+    "dcaps_mode": dcaps_mode,
+    "dcaps_max_mismatches": int(max_dcaps_mismatches),
+    "specificity_policy": specificity_policy,
+    "target_variant": selected_variant.label if selected_variant else None,
+    "reference_files": (
+        {"reference": source_args[1] if source_args[0] == "FASTA" else None,
+         "vcf": source_args[5]} if source_args else {}
+    ),
+}
 
 if run_mode in ("制限酵素の探索", "新規プライマー設計", "既存プライマーから解析"):
     available = bool(enzymes) and (bool(locus) or bool(source_args))
@@ -406,6 +467,13 @@ if run_mode in ("制限酵素の探索", "新規プライマー設計", "既存�
             st.session_state["caps_summary"] = summary
             st.session_state["caps_signature"] = signature
             st.session_state["caps_result_mode"] = run_mode
+            st.session_state["caps_config"] = run_config
+        except AmbiguousProductError as exc:
+            st.error(str(exc))
+            st.markdown("##### 予測された全PCR産物（消化前）")
+            st.dataframe(pd.DataFrame(exc.products), hide_index=True,
+                         width="stretch")
+            st.session_state.pop("caps_results", None)
         except (OSError, RuntimeError, ValueError, KeyError) as exc:
             st.error(str(exc))
             st.session_state.pop("caps_results", None)
@@ -421,9 +489,19 @@ if run_mode == "区間マーカーを一括設計" and source_args:
         target_count = st.number_input("目標本数", 1, 1000, 20)
     with plan3:
         max_discovery = st.number_input("探索変異上限", 1, 50000, 1000, 100)
-        max_targets = st.number_input("候補サイト数の上限", 1, 1000, 100, 10)
+        max_targets = st.number_input("出力マーカー数の上限", 1, 1000, 100, 10)
+    plan4, plan5 = st.columns(2)
+    with plan4:
+        min_spacing = st.number_input(
+            "マーカー間の最小物理間隔(bp、0で制限なし)", 0, 10_000_000, 0, 1000,
+            help="選ばれた座位どうしがこの距離未満にならないようにします。"
+                 "産物長やプライマー位置とは独立した物理距離です。")
+    with plan5:
+        radius = st.number_input(
+            "区画中心からの探索半径(bp、0で区画全体)", 0, 10_000_000, 0, 1000)
     batch_sig = parsing_sig(source_args, enzymes, panel_mode, spacing,
-                            target_count, max_discovery, max_targets, dcaps_mode)
+                            target_count, max_discovery, max_targets, dcaps_mode,
+                            min_spacing, radius)
     if st.button("ステップ1：CAPS/dCAPSサイトを先に探索", type="primary"):
         try:
             with st.spinner("区間内の制限酵素サイトを探索中"):
@@ -439,7 +517,8 @@ if run_mode == "区間マーカーを一括設計" and source_args:
                 planned, panel_stats = choose_sites(
                     discovered, panel_mode, int(region_start), int(region_end),
                     spacing_bp=int(spacing), target_count=int(target_count),
-                    limit=int(max_targets),
+                    limit=int(max_targets), min_spacing_bp=int(min_spacing),
+                    search_radius_bp=int(radius) or None,
                 )
             st.session_state["batch_variants"] = variants
             st.session_state["batch_sites"] = planned
@@ -453,8 +532,8 @@ if run_mode == "区間マーカーを一括設計" and source_args:
         stats = st.session_state["batch_stats"]
         st.caption(
             f"差のある変異 {stats['n_differential_variants']} 件 / "
-            f"認識サイト {stats['n_sites']} 件 / "
-            f"設計対象 {stats['selected']} 件"
+            f"認識サイト {stats['n_sites']} 件（{stats.get('loci', '?')} 座位） / "
+            f"設計対象 {stats['selected']} 件（{stats.get('selected_loci', '?')} 座位）"
         )
         if stats.get("truncated"):
             st.warning("設計対象が上限を超えています。上限件数までの結果です。")
@@ -462,13 +541,23 @@ if run_mode == "区間マーカーを一括設計" and source_args:
             st.warning("入力・解析設定が変更されました。ステップ1を再実行してください。")
         else:
             planned = st.session_state["batch_sites"]
+            uncovered = stats.get("uncovered_bins") or []
+            st.image(marker_track_svg(planned, int(region_start), int(region_end),
+                                      uncovered), width="stretch")
             data = [
-                {"標的": x.identifier, "染色体": x.chrom,
+                {"標的": x.identifier, "座位ID": f"{x.chrom}:{x.source_variant}",
+                 "染色体": x.chrom,
                  "変異位置": x.position, "制限酵素サイト": x.site_position,
                  "酵素": x.enzyme, "種類": x.kind}
                 for x in planned
             ]
-            st.dataframe(pd.DataFrame(data), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(data), hide_index=True, width="stretch")
+            if uncovered:
+                with st.expander(f"未カバー区画 {len(uncovered)} 件（候補を補充していません）"):
+                    st.dataframe(pd.DataFrame(uncovered), hide_index=True,
+                                 width="stretch")
+                    st.download_button("未カバー区画CSV", table_bytes(uncovered),
+                                       "caps_maker_uncovered_bins.csv", "text/csv")
             if planned:
                 indices = st.multiselect(
                     "プライマーを設計するサイト",
@@ -479,13 +568,35 @@ if run_mode == "区間マーカーを一括設計" and source_args:
                         f"{planned[i].enzyme} {planned[i].kind}"
                     ),
                 )
-                if st.button("ステップ2：選択サイトのPrimer-BLASTを実行",
-                             disabled=not indices):
-                    all_rows = []
-                    failed = []
-                    progress = st.progress(0)
+                # Per-site results survive interruption (any widget click stops
+                # a Streamlit run); re-running step 2 resumes where it left off.
+                design_sig = parsing_sig(batch_sig, signature)
+                done = st.session_state.setdefault("batch_done", {})
+                done = {k: v for k, v in done.items() if k[0] == design_sig}
+                st.session_state["batch_done"] = done
+                finished = sum((design_sig, planned[i].identifier) in done for i in indices)
+                bcol1, bcol2 = st.columns([3, 1])
+                with bcol2:
+                    if st.button("途中結果を破棄", disabled=not done):
+                        st.session_state["batch_done"] = {}
+                        st.rerun()
+                if finished:
+                    st.caption(f"選択 {len(indices)} 件中 {finished} 件は計算済み"
+                               "（再実行時はスキップして続きから計算）")
+                with bcol1:
+                    start_batch = st.button(
+                        "ステップ2：選択サイトのPrimer-BLASTを実行（中断・再開可）",
+                        disabled=not indices)
+                if start_batch:
+                    progress = st.progress(0.0)
+                    status_line = st.empty()
                     for ordinal, site_i in enumerate(indices, 1):
                         site = planned[site_i]
+                        key = (design_sig, site.identifier)
+                        if key in done:
+                            progress.progress(ordinal / len(indices))
+                            continue
+                        status_line.caption(f"{ordinal}/{len(indices)}: {site.identifier} を設計中")
                         try:
                             low = max(int(region_start), site.position - int(product_max))
                             high = min(int(region_end), site.position + int(product_max))
@@ -512,25 +623,57 @@ if run_mode == "区間マーカーを一括設計" and source_args:
                             rows = [r for r in rows if r.get("設計方式") == site.kind]
                             if not rows:
                                 raise ValueError("条件を満たすプライマー・酵素ペアがありません。")
+                            kept = []
                             for row in rows[:3]:
+                                row["座位ID"] = f"{site.chrom}:{site.source_variant}"
                                 row["染色体"] = chrom
                                 row["標的座標(1-based)"] = site.position
                                 row["制限酵素サイト(1-based)"] = site.site_position
-                                all_rows.append(row)
-                        except (OSError, ValueError, RuntimeError) as exc:
-                            failed.append({"標的": site.identifier, "理由": str(exc)})
+                                kept.append(row)
+                            done[key] = {"rows": kept, "error": None}
+                        except (OSError, ValueError, RuntimeError,
+                                subprocess.SubprocessError) as exc:
+                            done[key] = {"rows": [], "error": str(exc)}
                         progress.progress(ordinal / len(indices))
+                    status_line.caption("完了")
+
+                if any((design_sig, planned[i].identifier) in done for i in indices):
+                    all_rows, failed, pending = [], [], []
+                    for site_i in indices:
+                        site = planned[site_i]
+                        entry = done.get((design_sig, site.identifier))
+                        if entry is None:
+                            pending.append(site.identifier)
+                        elif entry["error"]:
+                            failed.append({"標的": site.identifier, "理由": entry["error"]})
+                        else:
+                            all_rows.extend(entry["rows"])
+                    if pending:
+                        st.warning(f"未計算 {len(pending)} 件（中断）。ステップ2を再実行すると続きから計算します。"
+                                   "下の表は途中結果です。")
                     st.session_state["caps_results"] = sorted(
                         all_rows,
                         key=lambda r: (not r.get("参照検証採用可"),
-                                       -float(r.get("総合設計スコア", 0))),
+                                       -float(r.get("総合設計スコア", 0)),
+                                       str(r.get("座位ID", ""))),
                     )
                     st.session_state["caps_summary"] = {
-                        "attempted": len(indices), "failed": failed,
-                        "result_rows": len(all_rows),
+                        "attempted": len(indices) - len(pending), "failed": failed,
+                        "pending": pending, "result_rows": len(all_rows),
+                        "loci_with_markers": len({r["座位ID"] for r in all_rows}),
+                        "uncovered_bins": uncovered,
                     }
                     st.session_state["caps_signature"] = batch_sig
                     st.session_state["caps_result_mode"] = run_mode
+                    st.session_state["caps_config"] = {
+                        **run_config,
+                        "panel": {"mode": panel_mode, "spacing_bp": int(spacing),
+                                  "target_count": int(target_count),
+                                  "min_spacing_bp": int(min_spacing),
+                                  "search_radius_bp": int(radius) or None,
+                                  "max_markers": int(max_targets),
+                                  "selected_sites": [planned[i].identifier for i in indices]},
+                    }
 
 if "caps_results" in st.session_state:
     if run_mode == st.session_state.get("caps_result_mode"):
@@ -538,6 +681,10 @@ if "caps_results" in st.session_state:
             if st.session_state.get("caps_signature") != signature:
                 st.warning("表示されているのは前の条件での結果です。再解析してください。")
         summary = st.session_state.get("caps_summary") or {}
+        if summary.get("all_products"):
+            st.markdown("##### 予測された全PCR産物（標的産物を確認してから消化）")
+            st.dataframe(pd.DataFrame(summary["all_products"]), hide_index=True,
+                         width="stretch")
         with st.expander("実行サマリー・未成功サイト", expanded=False):
             st.json(summary)
             if summary.get("failed"):
