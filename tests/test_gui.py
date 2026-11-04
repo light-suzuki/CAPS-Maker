@@ -42,7 +42,8 @@ def test_register_reference_is_persistent_and_selectable(tmp_path, monkeypatch):
     pysam.faidx(str(fasta))
     app = Path(__file__).resolve().parents[1] / "app.py"
     at = AppTest.from_file(str(app), default_timeout=25).run()
-    assert [tab.label for tab in at.tabs] == ["マーカー設計", "DB管理", "制限酵素", "ゲル・判定条件"]
+    assert [tab.label for tab in at.tabs] == ["マーカー設計", "ジェノタイピング", "組換え・絞り込み", "設定",
+                                            "参照データ・DB", "制限酵素", "ゲル・判定条件"]
     find_by_label(at.text_input, "登録名").input("テスト参照")
     find_by_label(at.selectbox, "データ種別").set_value("参照FASTA")
     find_by_label(at.text_input, "ファイルパス / DB接頭辞").input(str(fasta))
@@ -210,3 +211,17 @@ def test_named_resources_to_real_usable_pcr_results(tmp_path, monkeypatch):
         assert any(usable_marker(r) for r in at.session_state["caps_results"])
         assert at.session_state["caps_config"]["resolved_target"]["chrom"] == "Chr4"
         assert at.session_state["caps_summary"]["input_primers_swapped"] is swapped
+
+
+def test_population_goal_and_genotyping_tab_render(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPS_MAKER_HOME", str(tmp_path / "settings"))
+    app = Path(__file__).resolve().parents[1] / "app.py"
+    at = AppTest.from_file(str(app), default_timeout=25).run()
+    goal = find_by_label(at.radio, "識別したい遺伝子型")
+    assert len(goal.options) == 4
+    find_by_label(at.selectbox, "テンプレートを選ぶ").set_value("builtin:backcross_a")
+    find_by_label(at.button, "このテンプレートを適用").click().run()
+    assert not at.exception
+    assert find_by_label(at.radio, "識別したい遺伝子型").value == "AAとABを区別（Aへの戻し交雑）"
+    assert find_by_label(at.selectbox, "集団の種類").value == "戻し交雑（反復親A）"
+    assert any("使えるマーカー候補がまだありません" in item.value for item in at.info)
