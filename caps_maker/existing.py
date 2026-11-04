@@ -119,6 +119,32 @@ def locate_reference_product(
     return matches[0], evidence
 
 
+def locate_primer_product(
+    forward: str, reverse: str, databases: Sequence[str], max_product: int = 10000,
+) -> Tuple[Tuple[str, int, int], Sequence[dict]]:
+    """Find a unique primary-reference F/R product without supplied coordinates."""
+    if not databases:
+        raise ValueError("標的座位の検索にはBLAST DBが必要です。")
+    evidence = run_primer_check(forward.upper(), reverse.upper(), databases,
+                                max_product=max_product)
+    if not evidence:
+        raise ValueError("プライマー検索の結果を取得できませんでした。")
+    primary = evidence[0]
+    if primary.get("search_completeness") != "complete":
+        raise AmbiguousProductError("BLAST探索が不完全なため場所を決定できません。", product_table(evidence))
+    matches = set()
+    for product in primary.get("products") or []:
+        if product.get("orientation") in ("F/R", "R/F") and product.get("subject"):
+            start, end = sorted((int(product["start"]), int(product["end"])))
+            if 1 <= start < end:
+                matches.add((str(product["subject"]), start, end))
+    if len(matches) != 1:
+        raise AmbiguousProductError(
+            f"参照DB中の標的候補が{len(matches)}件のため場所を一意に決定できません。"
+            "場所を絞り込むか、プライマーを確認してください。", product_table(evidence))
+    return matches.pop(), evidence
+
+
 def analyze_primers(
     a: str, b: str, alignment: AlleleAlignment,
     forward: str, reverse: str,
@@ -136,7 +162,17 @@ def analyze_primers(
     if not databases:
         raise ValueError("既存プライマーの特異性検証にはBLAST DBが必要です。")
     gel_profile = gel_profile or GelProfile()
+    forward, reverse = forward.strip().upper(), reverse.strip().upper()
     intervals = primer_intervals(a, forward, reverse, min_bp=min_bp, max_bp=max_bp)
+    swapped = False
+    if not intervals:
+        intervals = primer_intervals(a, reverse, forward, min_bp=min_bp, max_bp=max_bp)
+        if intervals:
+            forward, reverse = reverse, forward
+            swapped = True
+            # Original evidence labels the strands with the user's F/R names.
+            # Recheck after canonicalising so off-target reconstruction uses the same names.
+            check_evidence = None
     if not intervals:
         raise ValueError("配列Aに指定したF/Rプライマーが同方向で見つからないか、PCR産物長の条件外です。")
     # Ambiguous products are reported but not auto-endorsed.
@@ -179,6 +215,7 @@ def analyze_primers(
             "B産物(bp)": len(seq_b),
             "Tm F(°C)": _tm(forward),
             "Tm R(°C)": _tm(reverse),
+            "プライマーの向き": "入力F/Rを交換して参照＋鎖で評価" if swapped else "入力F/Rの順",
         })
         apply_verdict(row, verdict, window, left, right)
     rows.sort(key=lambda x: (not x["参照検証採用可"], -x["総合設計スコア"]))
@@ -186,6 +223,7 @@ def analyze_primers(
     target = (anchor[0], anchor[1][0], anchor[1][1]) if anchor else None
     return rows, {
         "n_existing_pairs": 1,
+        "input_primers_swapped": swapped,
         "caps_candidates": len(rows),
         "amplicon_start_a": left + 1,
         "amplicon_end_a": right + 1,

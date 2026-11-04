@@ -7,3 +7,11 @@ venv/
 .streamlit/secrets.toml
 *.csv
 *.tsv
+/local/
+/data/
+/output/
+/reports/
+/catalog.json
+/caps_maker_provenance.json
+/caps_maker_amplicons.bed
+/caps_maker_gel.svg
