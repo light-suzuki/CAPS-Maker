@@ -442,3 +442,117 @@ def rqtl_csv_bytes(sheet: ScoredSheet) -> bytes:
     buffer = io.StringIO(newline="")
     csv.writer(buffer, lineterminator="\n").writerows(lines)
     return buffer.getvalue().encode("utf-8")
+
+
+# ---- marker density and narrowing ---------------------------------------------
+
+DENSITY_MODES = ("一定間隔", "指定本数", "全座位")
+
+
+def _chrom(row: Mapping) -> str:
+    return str(row.get("参照染色体") or row.get("染色体") or "")
+
+
+def locus_span(rows: Sequence[Mapping]) -> Dict[str, Tuple[int, int]]:
+    """Chromosome -> (min, max) position of the candidate loci."""
+    spans: Dict[str, Tuple[int, int]] = {}
+    for row in rows:
+        pos = marker_position(row)
+        if pos is None:
+            continue
+        lo, hi = spans.get(_chrom(row), (pos, pos))
+        spans[_chrom(row)] = (min(lo, pos), max(hi, pos))
+    return spans
+
+
+def select_by_density(rows: Sequence[Mapping], mode: str, chrom: str, start: int, end: int,
+                      spacing_bp: int = 100_000, count: int = 10) -> Tuple[List[int], List[dict]]:
+    """Pick at most one assay per bin inside chrom:start-end.
+
+    Candidates are ranked; alternative pairs at one locus are alternatives, not
+    extra markers, so only the best-ranked row per locus competes. Within a bin
+    a co-dominant marker beats a dominant one, then the locus nearest the bin
+    centre wins. Empty bins are reported, never filled.
+    """
+    if mode not in DENSITY_MODES:
+        raise ValueError("マーカー密度の指定方法が不明です。")
+    if end < start:
+        raise ValueError("区間の終了が開始より前です。")
+    if spacing_bp < 1 or count < 1:
+        raise ValueError("間隔と本数は1以上にしてください。")
+    best: Dict[int, int] = {}
+    for i, row in enumerate(rows):
+        pos = marker_position(row)
+        if pos is None or _chrom(row) != chrom or not start <= pos <= end:
+            continue
+        best.setdefault(pos, i)          # rows are ranked: first one wins
+    loci = sorted(best.items())
+    if mode == "全座位":
+        return [i for _, i in loci], []
+    total = end - start + 1
+    width = spacing_bp if mode == "一定間隔" else max(1, -(-total // count))
+    chosen, empty = [], []
+    for b in range(-(-total // width)):
+        lo = start + b * width
+        hi = min(end, lo + width - 1)
+        centre = (lo + hi) / 2
+        inside = [(pos, i) for pos, i in loci if lo <= pos <= hi]
+        if not inside:
+            empty.append({"区画": b + 1, "開始(bp)": lo, "終了(bp)": hi})
+            continue
+        pos, i = min(inside, key=lambda item: (
+            not str(rows[item[1]].get("マーカー型", "")).startswith("共優性"),
+            abs(item[0] - centre), item[1]))
+        chosen.append(i)
+    return chosen, empty
+
+
+_CALL_SETS = {"A": {"A"}, "H": {"H"}, "B": {"B"}, "C": {"A", "H"}, "D": {"H", "B"}}
+
+
+def _ordered_markers(sheet: ScoredSheet) -> List[Tuple[str, int, str]]:
+    out = []
+    for m in sheet.markers:
+        try:
+            pos = int(float(sheet.info.get("Position", {}).get(m, "")))
+        except ValueError:
+            continue
+        out.append((sheet.info.get("Chromosome", {}).get(m, ""), pos, m))
+    return sorted(out)
+
+
+def recombination_report(sheet: ScoredSheet) -> Tuple[List[dict], List[dict]]:
+    """Breakpoints per progeny and recombinant counts per adjacent marker interval.
+
+    A breakpoint is placed between consecutive scored markers whose calls cannot
+    be the same genotype (A- vs AB is compatible, A- vs BB is not). Missing
+    calls are skipped, so a breakpoint interval can span several markers; a
+    change hidden behind a dominant call is not counted.
+    """
+    order = _ordered_markers(sheet)
+    progeny = [k for k in sheet.individuals if k[0] == "Progeny"]
+    adjacent = {}
+    for (c1, p1, m1), (c2, p2, m2) in zip(order, order[1:]):
+        if c1 == c2:
+            adjacent[(m1, m2)] = {"染色体": c1, "左マーカー": m1, "右マーカー": m2,
+                                  "区間(bp)": f"{p1:,}–{p2:,}", "幅(kb)": round((p2 - p1) / 1000, 1),
+                                  "組換え個体": 0, "うち区間が確定": 0}
+    names = [o[2] for o in order]
+    breaks = []
+    for key in progeny:
+        last = None
+        for chrom, pos, m in order:
+            code = sheet.calls[key][m]
+            if code == "-":
+                continue
+            if last and last[0] == chrom and not (_CALL_SETS[last[3]] & _CALL_SETS[code]):
+                breaks.append({"個体": key[1], "染色体": chrom, "左マーカー": last[2],
+                               "右マーカー": m, "区間(bp)": f"{last[1]:,}–{pos:,}",
+                               "型の変化": f"{CALL_LABEL[last[3]]}→{CALL_LABEL[code]}"})
+                span = names[names.index(last[2]):names.index(m) + 1]
+                for pair in zip(span, span[1:]):
+                    adjacent[pair]["組換え個体"] += 1
+                    if len(span) == 2:
+                        adjacent[pair]["うち区間が確定"] += 1
+            last = (chrom, pos, m, code)
+    return breaks, list(adjacent.values())

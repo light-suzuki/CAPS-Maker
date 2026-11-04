@@ -7,8 +7,8 @@ import pytest
 from caps_maker.experiments import GelProfile
 from caps_maker.genotyping import (
     GOALS, bench_sheet, call_from_bands, expected_lanes, genotype_table_bytes, normalize_call,
-    qc_report, read_scoring_sheet, rqtl_csv_bytes, scoring_sheet, segregation_test,
-    unique_marker_names, usable_marker,
+    qc_report, read_scoring_sheet, recombination_report, rqtl_csv_bytes, scoring_sheet,
+    segregation_test, select_by_density, unique_marker_names, usable_marker,
 )
 
 F2, RIL, BC_A, BC_B = GOALS
@@ -129,3 +129,43 @@ def test_scoring_sheet_round_trip_qc_and_exports():
 def test_scoring_sheet_rejects_foreign_layout():
     with pytest.raises(ValueError, match="記録シート形式"):
         read_scoring_sheet("sample,M1\nx,AA\n".encode())
+
+
+def _at(pos, kind="共優性（3遺伝子型を識別）", chrom="chr1"):
+    row = marker(kind, chrom=chrom, start=pos - 200, end=pos + 200)
+    row["標的座標(1-based)"] = pos
+    return row
+
+
+def test_density_picks_one_locus_per_bin_and_reports_empty_bins():
+    rows = [_at(10_000), _at(10_000),                       # alternative pair, same locus
+            _at(40_000, "優性型（ABとBBが同じ）"), _at(60_000),  # same bin: co-dominant wins
+            _at(250_000), _at(55_000, chrom="chr2")]
+    chosen, empty = select_by_density(rows, "一定間隔", "chr1", 1, 300_000, spacing_bp=100_000)
+    assert chosen == [3, 4]          # 60 kb is co-dominant and nearest the 50 kb centre
+    assert [e["区画"] for e in empty] == [2]
+
+    # Narrowing: same candidates, denser inside a sub-interval.
+    chosen, empty = select_by_density(rows, "一定間隔", "chr1", 1, 100_000, spacing_bp=25_000)
+    assert chosen == [0, 2, 3] and len(empty) == 1
+    chosen, _ = select_by_density(rows, "指定本数", "chr1", 1, 300_000, count=1)
+    assert len(chosen) == 1
+    chosen, _ = select_by_density(rows, "全座位", "chr1", 1, 300_000)
+    assert chosen == [0, 2, 3, 4]
+    with pytest.raises(ValueError):
+        select_by_density(rows, "一定間隔", "chr1", 10, 1)
+
+
+def test_recombination_report_locates_breakpoints():
+    rows = [_at(p) for p in (100_000, 200_000, 300_000, 400_000)]
+    progeny = [("F2_001", ["AA", "AA", "AB", "AB"]),   # break 200k-300k
+               ("F2_002", ["AA", "", "AB", "AB"]),     # break spans 100k-300k (missing)
+               ("F2_003", ["A-", "AB", "AB", "BB"]),   # A- vs AB compatible; break 300k-400k
+               ("F2_004", ["BB", "BB", "BB", "BB"])]
+    data = _filled_sheet(rows, [("Parent_A", ["AA"] * 4), ("Parent_B", ["BB"] * 4),
+                                ("F1", ["AB"] * 4), *progeny])
+    breaks, intervals = recombination_report(read_scoring_sheet(data))
+    assert [(b["個体"], b["左マーカー"].split("_")[1], b["右マーカー"].split("_")[1]) for b in breaks] == [
+        ("F2_001", "200000", "300000"), ("F2_002", "100000", "300000"), ("F2_003", "300000", "400000")]
+    counts = [(r["組換え個体"], r["うち区間が確定"]) for r in intervals]
+    assert counts == [(1, 0), (2, 1), (1, 1)]

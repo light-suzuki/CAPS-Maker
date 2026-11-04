@@ -7,8 +7,9 @@ import streamlit as st
 from . import ui
 from .core import table_bytes
 from .genotyping import (
-    CALL_LABEL, POPULATION_FOR_GOAL, POPULATIONS, bench_sheet, genotype_table_bytes,
-    marker_name, qc_report, read_scoring_sheet, rqtl_csv_bytes, scoring_sheet, unique_marker_names,
+    CALL_LABEL, DENSITY_MODES, POPULATION_FOR_GOAL, POPULATIONS, bench_sheet, genotype_table_bytes,
+    locus_span, qc_report, read_scoring_sheet, recombination_report, rqtl_csv_bytes, scoring_sheet,
+    marker_position, select_by_density, unique_marker_names,
 )
 
 
@@ -33,6 +34,63 @@ def _sample_names() -> list[str]:
     return names
 
 
+def _density_picker(markers: list[dict], names: list[str]) -> list[int]:
+    """Region + density controls, then an editable multiselect seeded from them."""
+    spans = locus_span(markers)
+    if not spans:
+        return st.multiselect("記録するマーカー", list(range(len(markers))), key="gt_markers",
+                              format_func=lambda i: names[i])
+    ui.subheading("範囲と密度")
+    chroms = sorted(spans)
+    c1, c2, c3 = st.columns([1.2, 1, 1])
+    with c1:
+        chrom = st.selectbox("染色体", chroms, key="gt_chrom")
+    lo, hi = spans[chrom]
+    with c2:
+        start = st.number_input("開始(bp)", 1, None, lo, 1000, key=f"gt_start_{chrom}")
+    with c3:
+        end = st.number_input("終了(bp)", 1, None, hi, 1000, key=f"gt_end_{chrom}")
+    d1, d2 = st.columns([1.6, 1])
+    with d1, st.container(key="seg_gt_density"):
+        mode = st.radio("密度の決め方", DENSITY_MODES, horizontal=True, key="gt_density")
+    with d2:
+        if mode == "一定間隔":
+            spacing_kb = st.number_input("マーカー間隔(kb)", 0.1, 100_000.0, 100.0, 10.0,
+                                         key="gt_spacing_kb", format="%g")
+            count = 1
+        elif mode == "指定本数":
+            count = st.number_input("本数", 1, 1000, 10, key="gt_count_markers")
+            spacing_kb = 1.0
+        else:
+            spacing_kb, count = 1.0, 1
+            st.caption("範囲内の全座位から各座位1組ずつ選びます。")
+    try:
+        seeded, empty = select_by_density(markers, mode, chrom, int(start), int(end),
+                                          spacing_bp=max(1, round(spacing_kb * 1000)), count=int(count))
+    except ValueError as exc:
+        st.error(str(exc))
+        seeded, empty = [], []
+    n_loci = len({(m.get("参照染色体"), marker_position(m)) for m in markers})
+    width_kb = (int(end) - int(start) + 1) / 1000
+    msg = (f"{chrom}:{int(start):,}–{int(end):,}（{width_kb:,.1f} kb）で {len(seeded)} マーカー"
+           f"（候補 {len(markers)} 組・全 {n_loci} 座位）。")
+    if empty:
+        msg += f" 候補のない区画が {len(empty)} 個あります。"
+    st.caption(msg + "区画内では共優性→区画中心に近い座位の順に選びます。下の一覧で追加・削除できます。")
+    if empty:
+        with st.expander(f"候補のない区画 {len(empty)} 個"):
+            st.dataframe(pd.DataFrame(empty), hide_index=True, width="stretch")
+    # Re-seed the editable list whenever the region or density changes.
+    signature = (chrom, int(start), int(end), mode, spacing_kb, int(count), len(markers))
+    if st.session_state.get("gt_density_sig") != signature:
+        st.session_state["gt_density_sig"] = signature
+        st.session_state["gt_markers"] = seeded
+    return st.multiselect(
+        "記録するマーカー", list(range(len(markers))), key="gt_markers",
+        format_func=lambda i: (f"{names[i]}（{markers[i].get('A産物(bp)', '')} bp・"
+                               f"{str(markers[i].get('マーカー型', '')).split('（')[0]}）"))
+
+
 def genotyping_panel(markers: list[dict], goal: str, profile) -> None:
     step = ui.StepCounter()
 
@@ -47,22 +105,17 @@ def genotyping_panel(markers: list[dict], goal: str, profile) -> None:
                              key="gt_include_f1")
 
     step("マーカーと記録シート",
-         "マーカー設計で表示された使える候補から選びます。記録シートには遺伝子型ごとの予測バンドが入り、"
+         "マーカー設計で表示された使える候補から、範囲と密度を決めて選びます。粗い間隔で全体を見て、"
+         "原因区間が絞れたらその区間だけを高密度にします。記録シートには遺伝子型ごとの予測バンドが入り、"
          "そのままゲル判読の早見表になります。")
     if not markers:
         st.info("使えるマーカー候補がまだありません。「マーカー設計」で解析すると、ここで選べます。"
                 "記録済みのシートの読み込み（下）は候補なしでも使えます。")
     else:
         names = unique_marker_names(markers)
-        # Candidates are ranked; alternative primer pairs for one locus share a
-        # base name. One assay per locus is the sensible default for a panel.
-        first_per_locus = list({marker_name(m, i): i for i, m in reversed(list(enumerate(markers)))}.values())
-        chosen = st.multiselect(
-            "記録するマーカー", list(range(len(markers))), key="gt_markers",
-            default=sorted(first_per_locus),
-            format_func=lambda i: (f"{names[i]}（{markers[i].get('A産物(bp)', '')} bp・"
-                                   f"{str(markers[i].get('マーカー型', '')).split('（')[0]}）"))
-        st.caption(f"{len(markers)} 候補・{len(first_per_locus)} 座位。初期選択は各座位で最上位の1組です。")
+        chosen = _density_picker(markers, names)
+        chosen = sorted(chosen, key=lambda i: (str(markers[i].get("参照染色体", "")),
+                                               marker_position(markers[i]) or 0, i))
         picked = [markers[i] for i in chosen]
         if picked:
             sheet = bench_sheet(picked, profile, goal)
@@ -105,6 +158,22 @@ def genotyping_panel(markers: list[dict], goal: str, profile) -> None:
     if problems:
         with st.expander(f"要確認の記録 {len(problems)} 件", expanded=True):
             st.dataframe(pd.DataFrame(problems), hide_index=True, width="stretch")
+
+    step("組換えと絞り込み", "隣り合うマーカー間で型が変わった後代を組換え個体として抽出します。"
+         "表現型と照らして原因区間を狭め、次の回は狭めた区間を高密度にして組換え個体だけを記録します。")
+    breaks, intervals = recombination_report(scored)
+    recombinants = sorted({b["個体"] for b in breaks})
+    ui.stats([("組換え個体", len(recombinants), "key"), ("組換え", len(breaks), ""),
+              ("組換えのないマーカー間", sum(1 for r in intervals if not r["組換え個体"]), "")])
+    if intervals:
+        st.dataframe(pd.DataFrame(intervals), hide_index=True, width="stretch")
+        st.caption("「組換え個体」が0のマーカー間は、この集団ではそれ以上分割できません。欠測をはさむ組換えは"
+                   "複数のマーカー間に数え、「うち区間が確定」には含めません。優性型の記録に隠れた組換えは数えていません。")
+    if breaks:
+        with st.expander(f"組換え個体の一覧 {len(recombinants)} 個体"):
+            st.dataframe(pd.DataFrame(breaks), hide_index=True, width="stretch")
+            st.caption("次の記録シートの「一覧を貼り付け」に使えます。")
+            st.code("\n".join(recombinants), language=None)
 
     step("遺伝子型表の出力")
     e1, e2 = st.columns(2)
