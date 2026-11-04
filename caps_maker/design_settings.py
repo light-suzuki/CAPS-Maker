@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+from .genotyping import GOALS
+
 
 DEFAULTS = {
     "input_mode": "参照区間＋2系統VCF", "run_mode": "新規プライマー設計",
@@ -22,6 +24,8 @@ BUILTINS = {
     "count": {"name": "区間から最大10座位", "settings": {
         "run_mode": "区間マーカーを一括設計", "panel_mode": "指定本数", "target_count": 10}},
     "existing": {"name": "既存プライマーを確認", "settings": {"run_mode": "既存プライマーから解析"}},
+    "backcross_a": {"name": "戻し交雑（反復親A）用", "settings": {"goal": "AAとABを区別（Aへの戻し交雑）"}},
+    "ril": {"name": "RIL・DH用", "settings": {"goal": "AAとBBを区別（ヘテロ判別は不要）"}},
 }
 RANGES = {"product_min": (70, 3000), "product_max": (70, 5000), "num_pairs": (1, 100),
           "spacing": (1, 10000000), "target_count": (1, 1000), "max_discovery": (1, 50000),
@@ -51,7 +55,7 @@ def apply_settings(settings: dict, state) -> None:
         "panel_mode": ("一定間隔", "指定本数", "全酵素サイト"),
         "specificity_choice": ("厳密（標的以外の産物を認めない）", "ゲル判別型（副産物も消化して評価）"),
         "dcaps_choice": ("CAPSのみ", "CAPSが使えなければdCAPS", "CAPS/dCAPS両方"),
-        "goal": ("AA・AB・BBを区別（ヘテロも判別）", "AAとBBを区別（ヘテロ判別は不要）"),
+        "goal": tuple(GOALS),
         "enzyme_mode": ("指定した酵素", "保存した酵素セット", "全酵素"),
     }
     from .experiments import PROFILE_PRESETS

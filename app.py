@@ -13,7 +13,7 @@ from primerblast_oss.gel import virtual_gel_svg
 from caps_maker import ui
 from caps_maker.batch import choose_sites, discover_sites, marker_track_svg
 from caps_maker.core import (
-    align_alleles, available_enzymes, parse_sequence, scan_caps, table_bytes,
+    align_alleles, parse_sequence, scan_caps, table_bytes,
 )
 from caps_maker.existing import (
     AmbiguousProductError, analyze_primers, locate_reference_product, locate_primer_product,
@@ -28,7 +28,11 @@ from caps_maker.sources import (
 )
 from caps_maker.validation import parse_fragment_column
 from caps_maker.catalog import load_catalog
-from caps_maker.genotyping import usable_marker
+from caps_maker.genotyping import (
+    GOAL_CAPTIONS, GOAL_SHORT, GOALS, bench_sheet, call_from_bands, expected_lanes,
+    unique_marker_names, usable_marker,
+)
+from caps_maker.genotyping_ui import genotyping_panel
 from caps_maker.design_settings import reset_gel_settings
 from caps_maker.workspace_ui import (
     database_manager, enzyme_manager, primary_databases, resource_picker, template_controls,
@@ -66,16 +70,19 @@ def parsing_sig(*args) -> str:
 
 
 def show_result_table(rows: list[dict], mode: str) -> None:
-    visible = [row for row in rows if usable_marker(row, three_genotypes, specificity_policy)]
+    visible = [row for row in rows if usable_marker(row, three_genotypes, specificity_policy, goal=goal)]
+    st.session_state["genotyping_markers"] = visible
     if not visible:
         if mode == "制限酵素の探索":
             st.info("制限酵素サイトの探索だけでは増幅・特異性が未評価です。"
                     "使える候補を出すには、参照区間＋2系統VCFで新規設計または既存プライマー解析を実行してください。")
         else:
-            st.info("両系統での増幅予測・特異性・遺伝子型の判別条件を満たす候補がありません。")
+            st.info("両系統での増幅予測・特異性・遺伝子型の判別条件を満たす候補がありません。"
+                    f"（対象集団：{GOAL_SHORT[goal]}）")
         return
+    visible = [{"マーカー名": name, **row} for name, row in zip(unique_marker_names(visible), visible)]
     loci = {r.get("座位ID") for r in visible if r.get("座位ID")}
-    cards = [("使えるマーカー候補", len(visible), "key"),
+    cards = [(f"使えるマーカー候補 · {GOAL_SHORT[goal]}", len(visible), "key"),
              ("共優性（AA・AB・BB）", sum("共優性" in str(r.get("マーカー型", "")) for r in visible), ""),
              ("特異性A（厳密合格）", sum(str(r.get("特異性区分", "")).startswith("A") for r in visible), "ok")]
     if loci:
@@ -83,7 +90,7 @@ def show_result_table(rows: list[dict], mode: str) -> None:
     ui.stats(cards)
     st.caption(f"条件を満たす {len(visible)} 件のみ表示。両系統で結合・産物を確認し、"
                "参照に対応するDBで特異性を評価済み。実際のPCR成功を保証するものではありません。")
-    preferred = ["酵素", "設計方式", "標的座標(1-based)", "A産物(bp)", "B産物(bp)",
+    preferred = ["マーカー名", "酵素", "設計方式", "標的座標(1-based)", "A産物(bp)", "B産物(bp)",
                  "マーカー型", "特異性区分", "総合設計スコア"]
     columns = [c for c in preferred if any(c in r for r in visible)]
 
@@ -97,7 +104,7 @@ def show_result_table(rows: list[dict], mode: str) -> None:
         choice = st.selectbox(
             "表示するマーカー",
             list(range(len(visible))),
-            format_func=lambda i: f"{i+1}. {visible[i]['酵素']}"
+            format_func=lambda i: f"{i+1}. {visible[i]['マーカー名']}"
                                   f" / {visible[i].get('設計方式', mode)}"
                                   f" / {visible[i]['マーカー型']}",
         )
@@ -130,6 +137,27 @@ def show_result_table(rows: list[dict], mode: str) -> None:
                                    "image/svg+xml")
             except (ValueError, KeyError) as exc:
                 st.warning("ゲル表示に必要な情報がありません: " + str(exc))
+        ui.subheading("ゲルで読んだバンドから遺伝子型を確認")
+        b1, b2 = st.columns([3, 1])
+        with b1:
+            band_text = st.text_input("読み取ったバンド(bp、カンマ区切り)", key="observed_bands",
+                                      placeholder="例：320, 140")
+        with b2:
+            tolerance = st.number_input("サイズ許容誤差(%)", 1, 30, 10, key="band_tolerance")
+        if band_text.strip():
+            try:
+                observed = [float(v) for v in band_text.replace("、", ",").split(",") if v.strip()]
+                profile = st.session_state.get("active_gel_profile") or GelProfile()
+                matches = call_from_bands(observed, expected_lanes(row, profile),
+                                          tolerance / 100, profile.min_log10_gap)
+                if len(matches) == 1:
+                    ui.chips([(f"{matches[0]} と一致", "ok")])
+                elif matches:
+                    ui.chips([("区別できません：" + "・".join(matches), "")])
+                else:
+                    st.warning("どの遺伝子型の予測パターンとも一致しません。部分消化・副産物・サイズ読み取り誤差を確認してください。")
+            except ValueError as exc:
+                st.error(str(exc))
 
     with file_tab:
         st.caption("表示中の候補だけを書き出します。設定・出典JSONにはパスや系統名が含まれます。")
@@ -158,7 +186,12 @@ def show_result_table(rows: list[dict], mode: str) -> None:
                     ])
                 st.download_button("プライマー発注CSV", table_bytes(order_rows),
                                    "caps_maker_primer_order.csv", "text/csv")
-        download4, download5, _ = st.columns(3)
+        download4, download5, download6 = st.columns(3)
+        with download6:
+            st.download_button(
+                "ジェノタイピング実験表CSV",
+                table_bytes(bench_sheet(visible, st.session_state.get("active_gel_profile") or GelProfile(), goal)),
+                "caps_maker_genotyping_plan.csv", "text/csv")
         with download4:
             bed = bed_bytes(visible)
             if bed:
@@ -169,7 +202,7 @@ def show_result_table(rows: list[dict], mode: str) -> None:
         with download5:
             manifest = build_manifest(
                 {**(st.session_state.get("caps_config") or {"mode": mode}),
-                 "display_selection": {"three_genotypes": three_genotypes,
+                 "display_selection": {"three_genotypes": three_genotypes, "goal": goal,
                                        "specificity_policy": specificity_policy}}, visible,
                 databases=(st.session_state.get("caps_config") or {}).get("databases", []),
                 reference_files=(st.session_state.get("caps_config") or {}).get("reference_files"),
@@ -183,27 +216,20 @@ def show_result_table(rows: list[dict], mode: str) -> None:
 with st.sidebar:
     template_controls()
 
-design_tab, db_tab, enzyme_tab, gel_tab = st.tabs([
-    "マーカー設計", "DB管理", "制限酵素", "ゲル・判定条件",
+design_tab, genotyping_tab, db_tab, enzyme_tab, gel_tab = st.tabs([
+    "マーカー設計", "ジェノタイピング", "DB管理", "制限酵素", "ゲル・判定条件",
 ])
 with db_tab:
     database_manager()
 with enzyme_tab:
     enzymes = enzyme_manager()
 with gel_tab:
-    goal_col, gel_col = st.columns([1, 1.15], gap="large")
-    with goal_col:
-        st.subheader("ジェノタイピングの目的")
-        with st.container(key="cards_goal"):
-            goal = st.radio("識別したい遺伝子型", [
-                "AA・AB・BBを区別（ヘテロも判別）", "AAとBBを区別（ヘテロ判別は不要）",
-            ], key="goal", captions=[
-                "共優性マーカーのみ。F2など分離集団の遺伝子型判定向け",
-                "両ホモの識別だけでよい場合。優性型パターンも採用",
-            ])
-        three_genotypes = goal.startswith("AA・AB・BB")
-        st.caption("両系統での増幅予測と、完了したゲノム検索での特異性を必須にします。"
-                   "未確認・判定不能の候補は表示しません。")
+    gel_col, gel_note = st.columns([1.3, 1], gap="large")
+    with gel_note:
+        st.subheader("判定の考え方")
+        st.caption("遺伝子型ごとの予測バンドを、ここで指定した可視範囲と分離閾値でゲル上に再現し、"
+                   "区別できる遺伝子型の組を判定します。どの組が必要かは「マーカー設計」の"
+                   "対象集団で選びます。両系統での増幅予測と、完了したゲノム検索での特異性は常に必須です。")
     with gel_col:
         st.subheader("ゲル・ラダー条件")
         preset = st.selectbox("実験プリセット",
@@ -267,6 +293,11 @@ with design_tab:
     with st.container(key="cards_run_mode"):
         run_mode = st.radio("解析方式", list(RUN_MODES), captions=list(RUN_MODES.values()),
                             key="run_mode", label_visibility="collapsed")
+    ui.subheading("対象集団（ゲルで区別したい遺伝子型）")
+    with st.container(key="cards_goal"):
+        goal = st.radio("識別したい遺伝子型", list(GOALS), key="goal", captions=list(GOAL_CAPTIONS),
+                        label_visibility="collapsed")
+    three_genotypes = goal == next(iter(GOALS))
     with st.container(key="seg_input_mode"):
         input_mode = st.radio("配列の指定方法", INPUT_MODES, key="input_mode", horizontal=True)
     if input_mode == "2つのFASTA配列" and run_mode != "制限酵素の探索":
@@ -612,6 +643,13 @@ with design_tab:
                             dcaps_max_mismatches=int(max_dcaps_mismatches),
                             specificity_policy=specificity_policy, window=window,
                         )
+                    ref_pos = int(target_ref_pos) if target_ref_pos else None
+                    if ref_pos is None and window is not None:
+                        ref_pos = next((window.start + off for off, a in window.ref_to_a.items()
+                                        if a == selected_variant.position_a), None)
+                    if ref_pos:
+                        for r in rows:
+                            r.setdefault("標的座標(1-based)", ref_pos)
                 if selected_variant is not None:
                     run_config["target_variant"] = selected_variant.label
                 st.session_state["caps_results"] = rows
@@ -835,9 +873,15 @@ with design_tab:
                         "caps_maker_unresolved.csv", "text/csv",
                     )
         else:
+            st.session_state.pop("genotyping_markers", None)
             st.info("入力または解析条件が変わりました。再解析すると使える候補を表示します。")
+    else:
+        st.session_state.pop("genotyping_markers", None)
 
     ui.footer(CAUTION)
+
+with genotyping_tab:
+    genotyping_panel(st.session_state.get("genotyping_markers") or [], goal, gel_profile)
 
 with st.sidebar:
     st.divider()
@@ -845,7 +889,7 @@ with st.sidebar:
     ui.sidebar_summary([
         ("解析方式", run_mode),
         ("制限酵素", f"{len(enzymes)} 種"),
-        ("判別する遺伝子型", "AA・AB・BB" if three_genotypes else "AA・BB"),
+        ("対象集団", GOAL_SHORT[goal]),
         ("ゲル", preset),
         ("PCR産物長", f"{int(product_min)}–{int(product_max)} bp"),
         ("特異性判定", "厳密" if specificity_policy == "strict" else "ゲル判別型"),

@@ -73,7 +73,6 @@ h4 {{ font-size: 1.0625rem !important; font-weight: 700 !important; }}
 {_CARDS} [role="radiogroup"] {{ display: grid; gap: .75rem; width: 100%;
   grid-template-columns: repeat(2, minmax(0, 1fr)); }}
 @media (max-width: 640px) {{ {_CARDS} [role="radiogroup"] {{ grid-template-columns: 1fr; }} }}
-.st-key-cards_goal [role="radiogroup"] {{ grid-template-columns: 1fr; }}
 {_CARDS} [role="radiogroup"] > div, {_CARDS} [data-testid="stRadioOption"] {{ width: 100%; }}
 {_CARDS} [data-testid="stRadioOption"] p {{ text-align: left; }}
 {_CARDS} [role="radiogroup"] > div {{ margin: 0; padding: .875rem 1rem 1rem; position: relative;
