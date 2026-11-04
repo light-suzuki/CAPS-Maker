@@ -42,7 +42,8 @@ def test_register_reference_is_persistent_and_selectable(tmp_path, monkeypatch):
     pysam.faidx(str(fasta))
     app = Path(__file__).resolve().parents[1] / "app.py"
     at = AppTest.from_file(str(app), default_timeout=25).run()
-    assert [tab.label for tab in at.tabs] == ["マーカー設計", "ジェノタイピング", "DB管理", "制限酵素", "ゲル・判定条件"]
+    assert [tab.label for tab in at.tabs] == ["マーカー設計", "ジェノタイピング", "組換え・絞り込み", "設定",
+                                            "参照データ・DB", "制限酵素", "ゲル・判定条件"]
     find_by_label(at.text_input, "登録名").input("テスト参照")
     find_by_label(at.selectbox, "データ種別").set_value("参照FASTA")
     find_by_label(at.text_input, "ファイルパス / DB接頭辞").input(str(fasta))

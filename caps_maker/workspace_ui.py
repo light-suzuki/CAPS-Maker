@@ -13,21 +13,27 @@ def template_controls() -> None:
     saved = load_catalog()["design_templates"]
     options = {"builtin:" + k: v for k, v in BUILTINS.items()}
     options.update({"saved:" + entry["id"]: entry for entry in saved})
-    # Rendered in the sidebar; it must run before the widgets it fills in.
-    st.subheader("設計テンプレート")
-    chosen = st.selectbox("テンプレートを選ぶ", list(options), key="template_choice",
-                          format_func=lambda v: options[v]["name"])
-    if st.button("このテンプレートを適用", width="stretch"):
+    # Applied in a callback, so the controls may sit anywhere on the page.
+    def apply() -> None:
         try:
-            apply_settings(options[chosen]["settings"], st.session_state)
-            st.success("適用しました。場所・系統・DBを選んで解析してください。")
+            apply_settings(options[st.session_state["template_choice"]]["settings"], st.session_state)
+            st.session_state["_template_msg"] = ("ok", "適用しました。場所・系統・DBを選んで解析してください。")
         except (TypeError, ValueError) as exc:
-            st.error(str(exc))
-    with st.expander("現在の設定を保存"):
-        with st.form("save_design_template", border=False):
-            name = st.text_input("設定を保存する名前", placeholder="例：F2用・50 kb間隔")
-            submit = st.form_submit_button("現在の設定をテンプレート保存", width="stretch")
-        st.caption("条件だけを保存します。DB・座標・試料名・プライマー配列は含めません。")
+            st.session_state["_template_msg"] = ("error", str(exc))
+
+    st.selectbox("テンプレートを選ぶ", list(options), key="template_choice",
+                 format_func=lambda v: options[v]["name"])
+    st.button("このテンプレートを適用", width="stretch", type="primary", on_click=apply)
+    tone, message = st.session_state.pop("_template_msg", (None, None))
+    if tone == "ok":
+        st.success(message)
+    elif tone:
+        st.error(message)
+    st.divider()
+    with st.form("save_design_template", border=False):
+        name = st.text_input("設定を保存する名前", placeholder="例：F2用・50 kb間隔")
+        submit = st.form_submit_button("現在の設定をテンプレート保存", width="stretch")
+    st.caption("条件だけを保存します。DB・座標・試料名・プライマー配列は含めません。")
     if submit:
         try:
             old = next((e for e in saved if e["name"] == name.strip()), None)

@@ -5,8 +5,9 @@ Colour, type, radius and focus values are taken from ``@digital-go-jp/design-tok
 v2.1.0 (MIT License, Copyright (c) 2023 デジタル庁). Only presentation lives here.
 
 Styling hooks are Streamlit keyed containers: ``st.container(key="seg_…")`` renders a
-short radio as a segmented control and ``st.container(key="cards_…")`` renders a radio
-as selectable cards.
+short radio as a segmented control, ``st.container(key="cards_…")`` renders a radio
+as selectable cards and ``st.container(key="panel_…")`` is a white panel on the grey page
+(``panel_run`` also sticks to the top while the page scrolls).
 """
 from __future__ import annotations
 
@@ -35,38 +36,52 @@ _CARDS = '[class*="st-key-cards_"]'
 
 _CSS = f"""
 html, body {{ letter-spacing: .02em; }}
-[data-testid="stMainBlockContainer"] {{ max-width: 1160px; padding-top: 1.5rem; padding-bottom: 4rem; }}
-[data-testid="stHeader"] {{ background: transparent; }}
+.stApp {{ background: #f3f5f8; }}
+[data-testid="stMainBlockContainer"] {{ max-width: 1280px; padding: 1rem 2rem 4rem; }}
+[data-testid="stHeader"] {{ background: transparent; height: 0; }}
+[data-testid="stSidebarCollapsedControl"], [data-testid="stSidebar"] {{ display: none; }}
 p, li {{ line-height: 1.7; }}
 h3 {{ font-size: 1.25rem !important; font-weight: 700 !important; padding-top: .75rem !important; }}
 h4 {{ font-size: 1.0625rem !important; font-weight: 700 !important; }}
 
-/* page header */
-.caps-hdr {{ display: flex; align-items: center; justify-content: space-between; gap: 1rem;
-  padding-bottom: 1.25rem; }}
-.caps-hdr__brand {{ display: flex; align-items: center; gap: .875rem; }}
-.caps-hdr__logo {{ flex: none; width: 44px; height: 44px; }}
-.caps-hdr__name {{ font-size: 1.75rem; font-weight: 700; line-height: 1.3; color: var(--dads-gray-900); }}
-.caps-hdr__sub {{ font-size: .9375rem; color: var(--dads-gray-700); line-height: 1.5; }}
-.caps-chip {{ display: inline-flex; align-items: center; white-space: nowrap; font-size: .8125rem;
-  font-weight: 700; line-height: 1; padding: .45rem .75rem; border-radius: 999px;
-  border: 1px solid var(--dads-key-900); color: var(--dads-key-900); background: #fff; }}
+/* app bar */
+.caps-bar {{ display: flex; align-items: center; justify-content: space-between; gap: 1rem 2rem;
+  flex-wrap: wrap; padding: 1rem 1.5rem; border-radius: 14px; color: #fff;
+  background: linear-gradient(120deg, var(--dads-key-1200) 0%, var(--dads-key-1000) 45%, var(--dads-key-900) 100%); }}
+.caps-bar__brand {{ display: flex; align-items: center; gap: .875rem; }}
+.caps-bar__logo {{ flex: none; width: 40px; height: 40px; }}
+.caps-bar__name {{ font-size: 1.375rem; font-weight: 700; line-height: 1.2; }}
+.caps-bar__sub {{ font-size: .8125rem; opacity: .82; line-height: 1.5; }}
+.caps-ctx {{ display: flex; flex-wrap: wrap; gap: .5rem; }}
+.caps-ctx__item {{ display: flex; flex-direction: column; gap: .1rem; padding: .4rem .8rem;
+  border-radius: 8px; background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.18); min-width: 6.5rem; }}
+.caps-ctx__k {{ font-size: .6875rem; letter-spacing: .08em; opacity: .75; line-height: 1.3; }}
+.caps-ctx__v {{ font-size: .875rem; font-weight: 700; line-height: 1.35; white-space: nowrap; }}
+.caps-ctx__item--off .caps-ctx__v {{ color: var(--dads-focus); }}
 @media (max-width: 640px) {{
-  .caps-hdr {{ flex-wrap: wrap; padding-top: 1.5rem; }}
-  .caps-hdr__logo {{ display: none; }}
-  .caps-hdr__name {{ font-size: 1.5rem; }}
+  [data-testid="stMainBlockContainer"] {{ padding: .5rem 1rem 3rem; }}
+  .caps-bar {{ padding: .875rem 1rem; }}
+  .caps-bar__logo, .caps-bar__sub {{ display: none; }}
+  .caps-ctx__item {{ min-width: 0; }}
 }}
 
-/* numbered steps */
-.caps-step {{ display: flex; align-items: flex-start; gap: .875rem; margin: 2rem 0 .5rem;
-  padding-top: 1.75rem; border-top: 1px solid var(--dads-gray-200); }}
-.caps-step--first {{ margin-top: .75rem; padding-top: 0; border-top: 0; }}
-.caps-step__num {{ flex: none; width: 2rem; height: 2rem; border-radius: 999px; margin-top: .1rem;
+/* panels: st.container(key="panel_…") */
+[class*="st-key-panel_"] {{ background: #fff; border: 1px solid #e3e6eb; border-radius: 14px;
+  padding: 1.25rem 1.5rem 1.5rem; box-shadow: 0 1px 2px rgba(16,24,40,.04); }}
+[data-testid="stColumn"]:has(.st-key-panel_run) {{ position: sticky; top: 1rem; align-self: flex-start; }}
+@media (max-width: 640px) {{
+  [class*="st-key-panel_"] {{ padding: 1rem 1rem 1.25rem; border-radius: 12px; }}
+  [data-testid="stColumn"]:has(.st-key-panel_run) {{ position: static; }}
+}}
+.caps-ph {{ display: flex; align-items: flex-start; gap: .75rem; margin-bottom: .25rem; }}
+.caps-ph__num {{ flex: none; width: 1.75rem; height: 1.75rem; border-radius: 999px; margin-top: .05rem;
   display: inline-flex; align-items: center; justify-content: center;
-  background: var(--dads-key-900); color: #fff; font-weight: 700; font-size: 1rem; }}
-.caps-step__title {{ font-size: 1.375rem; font-weight: 700; line-height: 1.5; color: var(--dads-gray-900); }}
-.caps-step__lead {{ font-size: .9375rem; color: var(--dads-gray-700); line-height: 1.7; }}
-.caps-sub {{ font-size: 1.0625rem; font-weight: 700; margin: 1rem 0 0; color: var(--dads-gray-900); }}
+  background: var(--dads-key-900); color: #fff; font-weight: 700; font-size: .875rem; }}
+.caps-ph__title {{ font-size: 1.125rem; font-weight: 700; line-height: 1.5; color: var(--dads-gray-900); }}
+.caps-ph__lead {{ font-size: .875rem; color: var(--dads-gray-700); line-height: 1.6; }}
+.caps-lead {{ font-size: .9375rem; color: var(--dads-gray-700); line-height: 1.6; margin: -.25rem 0 .25rem; }}
+
+.caps-sub {{ font-size: .9375rem; font-weight: 700; margin: .75rem 0 0; color: var(--dads-gray-800); }}
 
 /* radio as selectable cards  (DOM: radiogroup > div[data-selected] > label + caption) */
 {_CARDS} [data-testid="stElementContainer"], {_CARDS} [data-testid="stRadio"] {{ width: 100%; }}
@@ -145,14 +160,26 @@ textarea {{ font-family: 'Noto Sans Mono', ui-monospace, monospace !important; f
 :focus-visible, label:has(input:focus-visible) {{ outline: 4px solid #000 !important;
   outline-offset: 2px !important; box-shadow: 0 0 0 2px var(--dads-focus) !important; }}
 
-/* tabs */
-[data-baseweb="tab-list"] {{ gap: .25rem; border-bottom: 1px solid var(--dads-gray-200); }}
-[data-baseweb="tab"] {{ padding: .75rem 1.125rem; height: auto; }}
-[data-baseweb="tab"] p {{ font-size: 1rem; color: var(--dads-gray-700); }}
-[data-baseweb="tab"][aria-selected="true"] p {{ color: var(--dads-key-900); font-weight: 700; }}
-[data-baseweb="tab"]:hover p {{ color: var(--dads-key-1000); text-decoration: underline; }}
-[data-baseweb="tab-highlight"] {{ height: 4px; background: var(--dads-key-900); }}
-[data-baseweb="tab-border"] {{ display: none; }}
+/* tabs (react-aria DOM): the top level inside key "mainnav" is the main navigation */
+[role="tablist"] {{ gap: .25rem; border-bottom: 1px solid var(--dads-gray-200); }}
+[data-testid="stTab"] {{ padding: .625rem 1rem; height: auto; }}
+[data-testid="stTab"] p {{ font-size: .9375rem; color: var(--dads-gray-700); }}
+[data-testid="stTab"][aria-selected="true"] p {{ color: var(--dads-key-900); font-weight: 700; }}
+[data-testid="stTab"]:hover p {{ color: var(--dads-key-1000); text-decoration: underline; }}
+[data-testid="stTab"] .react-aria-SelectionIndicator {{ height: 3px; background: var(--dads-key-900); }}
+.st-key-mainnav > [data-testid="stTabs"] > div > [role="tablist"] {{ margin: .75rem 0 1.25rem; padding: .3rem; gap: .25rem; border: 1px solid #e3e6eb;
+  border-radius: 12px; background: #fff; width: fit-content; max-width: 100%; overflow-x: auto;
+  box-shadow: 0 1px 2px rgba(16,24,40,.04); }}
+.st-key-mainnav > [data-testid="stTabs"] > div > [role="tablist"] > [data-testid="stTab"] {{ padding: .55rem 1.25rem; border-radius: 9px; margin: 0; }}
+.st-key-mainnav > [data-testid="stTabs"] > div > [role="tablist"] > [data-testid="stTab"] p {{ font-size: 1rem; font-weight: 700; color: var(--dads-gray-700); }}
+.st-key-mainnav > [data-testid="stTabs"] > div > [role="tablist"] > [data-testid="stTab"]:hover {{ background: var(--dads-key-50); }}
+.st-key-mainnav > [data-testid="stTabs"] > div > [role="tablist"] > [data-testid="stTab"][aria-selected="true"] {{ background: var(--dads-key-900); }}
+.st-key-mainnav > [data-testid="stTabs"] > div > [role="tablist"] > [data-testid="stTab"][aria-selected="true"] p {{ color: #fff; text-decoration: none; }}
+.st-key-mainnav > [data-testid="stTabs"] > div > [role="tablist"] > [data-testid="stTab"] .react-aria-SelectionIndicator {{ display: none; }}
+@media (max-width: 640px) {{
+  .st-key-mainnav > [data-testid="stTabs"] > div > [role="tablist"] > [data-testid="stTab"] {{ padding: .45rem .8rem; }}
+  .st-key-mainnav > [data-testid="stTabs"] > div > [role="tablist"] > [data-testid="stTab"] p {{ font-size: .875rem; }}
+}}
 
 /* banners and panels */
 [data-testid="stAlertContainer"] {{ border-radius: var(--dads-radius); border: 1px solid currentColor; }}
@@ -190,16 +217,13 @@ textarea {{ font-family: 'Noto Sans Mono', ui-monospace, monospace !important; f
 .caps-check__ng {{ color: var(--dads-gray-900); }}
 .caps-check small {{ color: var(--dads-gray-700); font-size: .8125rem; }}
 
-/* sidebar */
-[data-testid="stSidebar"] {{ border-right: 1px solid var(--dads-gray-200); }}
-[data-testid="stSidebar"] h2 {{ font-size: 1rem !important; }}
-.caps-side__title {{ font-size: .8125rem; font-weight: 700; color: var(--dads-gray-700);
-  letter-spacing: .06em; margin: .5rem 0 .25rem; }}
-.caps-dl {{ margin: 0 0 1rem; }}
-.caps-dl div {{ padding: .5rem 0; border-bottom: 1px solid var(--dads-gray-100); }}
-.caps-dl dt {{ font-size: .8125rem; color: var(--dads-gray-700); line-height: 1.4; }}
-.caps-dl dd {{ margin: 0; font-size: .9375rem; font-weight: 700; color: var(--dads-gray-900);
-  line-height: 1.5; word-break: break-all; }}
+/* run summary */
+.caps-dl {{ margin: .25rem 0 .75rem; display: grid; grid-template-columns: auto 1fr; column-gap: 1rem; }}
+.caps-dl dt {{ font-size: .8125rem; color: var(--dads-gray-700); line-height: 1.5; padding: .4rem 0;
+  border-bottom: 1px solid var(--dads-gray-100); }}
+.caps-dl dd {{ margin: 0; font-size: .875rem; font-weight: 700; color: var(--dads-gray-900);
+  line-height: 1.5; padding: .4rem 0; border-bottom: 1px solid var(--dads-gray-100);
+  text-align: right; word-break: break-all; }}
 .caps-note {{ font-size: .8125rem; line-height: 1.7; color: var(--dads-gray-700);
   border-left: 4px solid var(--dads-gray-420); padding: .25rem 0 .25rem .75rem; }}
 .caps-footer {{ margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--dads-gray-200);
@@ -207,8 +231,8 @@ textarea {{ font-family: 'Noto Sans Mono', ui-monospace, monospace !important; f
 [data-testid="stImage"] img {{ border-radius: 6px; }}
 """
 
-_LOGO = """<svg class="caps-hdr__logo" viewBox="0 0 44 44" aria-hidden="true">
-<rect width="44" height="44" rx="10" fill="#0017c1"/>
+_LOGO = """<svg class="caps-bar__logo" viewBox="0 0 44 44" aria-hidden="true">
+<rect width="44" height="44" rx="10" fill="#fff" fill-opacity=".14"/>
 <rect x="8" y="8" width="8" height="28" rx="2" fill="#fff" opacity=".16"/>
 <rect x="18" y="8" width="8" height="28" rx="2" fill="#fff" opacity=".16"/>
 <rect x="28" y="8" width="8" height="28" rx="2" fill="#fff" opacity=".16"/>
@@ -225,30 +249,38 @@ def inject_styles() -> None:
     st.html(f"<style>{_TOKENS}{_CSS}</style>")
 
 
-def header() -> None:
-    st.html(
-        '<div class="caps-hdr"><div class="caps-hdr__brand">' + _LOGO +
-        '<div><div class="caps-hdr__name">CAPS-Maker</div>'
-        '<div class="caps-hdr__sub">2系統を区別する、増幅予測とゲノム特異性を確認した'
-        'CAPS / dCAPSマーカー</div></div></div>'
-        '<span class="caps-chip">ローカル解析・in silico予測</span></div>'
-    )
+def header(context: Sequence[tuple[str, str, bool]] = ()) -> str:
+    """App bar HTML; context items are (label, value, ok)."""
+    items = "".join(
+        f'<div class="caps-ctx__item{"" if ok else " caps-ctx__item--off"}">'
+        f'<span class="caps-ctx__k">{escape(k)}</span><span class="caps-ctx__v">{escape(v)}</span></div>'
+        for k, v, ok in context)
+    return ('<div class="caps-bar"><div class="caps-bar__brand">' + _LOGO +
+            '<div><div class="caps-bar__name">CAPS-Maker</div>'
+            '<div class="caps-bar__sub">ジェノタイピング用 CAPS / dCAPS マーカー・ローカル in silico 予測</div>'
+            f'</div></div><div class="caps-ctx">{items}</div></div>')
+
+
+def panel_head(title: str, lead: str | None = None, num: int | None = None) -> None:
+    num_html = f'<span class="caps-ph__num">{num}</span>' if num is not None else ""
+    lead_html = f'<div class="caps-ph__lead">{escape(lead)}</div>' if lead else ""
+    st.html(f'<div class="caps-ph">{num_html}<div><div class="caps-ph__title">{escape(title)}</div>'
+            f'{lead_html}</div></div>')
+
+
+def lead(text: str) -> None:
+    st.html(f'<div class="caps-lead">{escape(text)}</div>')
 
 
 class StepCounter:
-    """Numbers visible sections in order, so a hidden step never leaves a gap."""
+    """Numbered panel headings, so a hidden step never leaves a gap."""
 
     def __init__(self) -> None:
         self.n = 0
 
     def __call__(self, title: str, lead: str | None = None) -> None:
         self.n += 1
-        first = " caps-step--first" if self.n == 1 else ""
-        lead_html = f'<div class="caps-step__lead">{escape(lead)}</div>' if lead else ""
-        st.html(
-            f'<div class="caps-step{first}"><span class="caps-step__num">{self.n}</span>'
-            f'<div><div class="caps-step__title">{escape(title)}</div>{lead_html}</div></div>'
-        )
+        panel_head(title, lead, self.n)
 
 
 def subheading(text: str) -> None:
@@ -288,12 +320,9 @@ def stats(items: Sequence[tuple[str, int | str, str]]) -> None:
     st.html('<div class="caps-stats">' + "".join(cards) + "</div>")
 
 
-def sidebar_summary(rows: Sequence[tuple[str, str]], note: str) -> None:
-    body = "".join(f"<div><dt>{escape(k)}</dt><dd>{escape(v)}</dd></div>" for k, v in rows)
-    st.html('<div class="caps-side__title">現在の設定</div>'
-            f'<dl class="caps-dl">{body}</dl>'
-            '<div class="caps-side__title">解釈上の注意</div>'
-            f'<div class="caps-note">{escape(note)}</div>')
+def summary(rows: Sequence[tuple[str, str]]) -> None:
+    body = "".join(f"<dt>{escape(k)}</dt><dd>{escape(v)}</dd>" for k, v in rows)
+    st.html(f'<dl class="caps-dl">{body}</dl>')
 
 
 def footer(text: str) -> None:
