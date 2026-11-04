@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from primerblast_oss.gel import virtual_gel_svg
+from caps_maker import ui
 from caps_maker.batch import choose_sites, discover_sites, marker_track_svg
 from caps_maker.core import (
     align_alleles, available_enzymes, parse_sequence, scan_caps, table_bytes,
@@ -34,24 +35,26 @@ from caps_maker.workspace_ui import (
 )
 
 st.set_page_config(page_title="CAPS-Maker", page_icon="🧬", layout="wide")
-st.markdown("""
-<style>
-.stApp { background: #f7f8f4; }
-[data-testid="stSidebar"] { background: #edf2eb; }
-.stButton > button[kind="primary"] { background: #176453; border-color: #176453; }
-h1, h2, h3 { color: #194b40; }
-.stMainBlockContainer { padding-top: 2rem; }
-</style>
-""", unsafe_allow_html=True)
-st.title("CAPS-Maker")
+ui.inject_styles()
+ui.header()
 try:
     load_catalog()
 except (OSError, ValueError) as exc:
     st.error(str(exc))
     st.stop()
-st.caption(
-    "2系統を区別する、増幅予測とゲノム特異性を確認したCAPS/dCAPSマーカー"
-)
+
+RUN_MODES = {
+    "新規プライマー設計": "標的の多型を1つ選び、Primer3とBLASTで両系統の増幅と特異性を確認して設計",
+    "既存プライマーから解析": "手持ちのF/Rプライマーの産物をゲノムで特定し、2系統を判別できる酵素を探す",
+    "区間マーカーを一括設計": "区間内に一定間隔・指定本数でマーカーを配置し、まとめてPrimer-BLAST",
+    "制限酵素の探索": "2つの配列全長を仮想消化（増幅・特異性は未評価、候補酵素の下調べ用）",
+}
+INPUT_MODES = ["参照区間＋2系統VCF", "2つのFASTA配列"]
+CAUTION = ("スコアは実験成功確率ではなく設計上の優先順位です。"
+           "CAPS探索単独は入力DNAの全長消化でありPCR産物の結果ではありません。"
+           "dCAPSはプライマー改変によって実際のPCR産物配列が変わるため、"
+           "提案されたプライマーと酵素で必ず実験検証してください。")
+
 
 @st.cache_data(show_spinner=False)
 def cached_sample_names(path: str) -> list[str]:
@@ -63,8 +66,6 @@ def parsing_sig(*args) -> str:
 
 
 def show_result_table(rows: list[dict], mode: str) -> None:
-    st.divider()
-    st.subheader("使えるマーカー候補")
     visible = [row for row in rows if usable_marker(row, three_genotypes, specificity_policy)]
     if not visible:
         if mode == "制限酵素の探索":
@@ -73,109 +74,114 @@ def show_result_table(rows: list[dict], mode: str) -> None:
         else:
             st.info("両系統での増幅予測・特異性・遺伝子型の判別条件を満たす候補がありません。")
         return
+    loci = {r.get("座位ID") for r in visible if r.get("座位ID")}
+    cards = [("使えるマーカー候補", len(visible), "key"),
+             ("共優性（AA・AB・BB）", sum("共優性" in str(r.get("マーカー型", "")) for r in visible), ""),
+             ("特異性A（厳密合格）", sum(str(r.get("特異性区分", "")).startswith("A") for r in visible), "ok")]
+    if loci:
+        cards.append(("座位（地図上のマーカー数）", len(loci), ""))
+    ui.stats(cards)
     st.caption(f"条件を満たす {len(visible)} 件のみ表示。両系統で結合・産物を確認し、"
                "参照に対応するDBで特異性を評価済み。実際のPCR成功を保証するものではありません。")
     preferred = ["酵素", "設計方式", "標的座標(1-based)", "A産物(bp)", "B産物(bp)",
                  "マーカー型", "特異性区分", "総合設計スコア"]
     columns = [c for c in preferred if any(c in r for r in visible)]
-    st.dataframe(pd.DataFrame(visible).reindex(columns=columns), width="stretch", hide_index=True)
-    with st.expander("全ての設計情報"):
-        st.dataframe(pd.DataFrame(visible), width="stretch", hide_index=True)
-    download1, download2, download3 = st.columns(3)
-    with download1:
-        st.download_button("結果CSV（Excel対応）", table_bytes(visible),
-                           "caps_maker_results.csv", "text/csv")
-    with download2:
-        st.download_button("結果TSV", table_bytes(visible, "\t"),
-                           "caps_maker_results.tsv", "text/tab-separated-values")
-    with download3:
-        if all("Forward(5'-3')" in row for row in visible):
-            ordered = set()
-            order_rows = []
-            for row in visible:
-                key = (row["Forward(5'-3')"], row["Reverse(5'-3')"])
-                if key in ordered:
-                    continue
-                ordered.add(key)
-                index = len(ordered)
-                order_rows.extend([
-                    {"Primer ID": f"CAPS_{index:03d}_F",
-                     "Sequence 5'-3'": key[0], "Tm(°C)": row.get("Tm F(°C)", "")},
-                    {"Primer ID": f"CAPS_{index:03d}_R",
-                     "Sequence 5'-3'": key[1], "Tm(°C)": row.get("Tm R(°C)", "")},
-                ])
-            st.download_button("プライマー発注CSV", table_bytes(order_rows),
-                               "caps_maker_primer_order.csv", "text/csv")
-    download4, download5 = st.columns(2)
-    with download4:
-        bed = bed_bytes(visible)
-        if bed:
-            st.download_button("参照座標BED（産物）", bed, "caps_maker_amplicons.bed",
-                               "text/plain")
-        else:
-            st.caption("参照座標のある候補がないためBEDは出力できません。")
-    with download5:
-        manifest = build_manifest(
-            {**(st.session_state.get("caps_config") or {"mode": mode}),
-             "display_selection": {"three_genotypes": three_genotypes,
-                                   "specificity_policy": specificity_policy}}, visible,
-            databases=(st.session_state.get("caps_config") or {}).get("databases", []),
-            reference_files=(st.session_state.get("caps_config") or {}).get("reference_files"),
-            summary=st.session_state.get("caps_summary"),
+
+    list_tab, gel_tab_view, file_tab = st.tabs(["候補一覧", "プライマーと予測ゲル", "ファイル出力"])
+    with list_tab:
+        st.dataframe(pd.DataFrame(visible).reindex(columns=columns), width="stretch", hide_index=True)
+        with st.expander("全ての設計情報"):
+            st.dataframe(pd.DataFrame(visible), width="stretch", hide_index=True)
+
+    with gel_tab_view:
+        choice = st.selectbox(
+            "表示するマーカー",
+            list(range(len(visible))),
+            format_func=lambda i: f"{i+1}. {visible[i]['酵素']}"
+                                  f" / {visible[i].get('設計方式', mode)}"
+                                  f" / {visible[i]['マーカー型']}",
         )
-        st.download_button("設定・出典JSON（再現用）", manifest_bytes(manifest),
-                           "caps_maker_provenance.json", "application/json")
+        row = visible[choice]
+        left, right = st.columns([1, 1], gap="large")
+        with left:
+            st.caption("Forward · 5′ → 3′")
+            st.code(row["Forward(5'-3')"], language=None)
+            st.caption("Reverse · 5′ → 3′")
+            st.code(row["Reverse(5'-3')"], language=None)
+            st.dataframe(pd.DataFrame([
+                {"遺伝子型": "AA", "予測断片(bp)": row["A断片(bp)"]},
+                {"遺伝子型": "AB", "予測断片(bp)": row["AB断片(bp)"]},
+                {"遺伝子型": "BB", "予測断片(bp)": row["B断片(bp)"]},
+            ]), hide_index=True, width="stretch")
+        with right:
+            try:
+                gel = assess_gel(
+                    parse_fragment_column(row["A断片(bp)"]),
+                    parse_fragment_column(row["B断片(bp)"]),
+                    st.session_state.get("active_gel_profile") or GelProfile(),
+                )
+                svg = virtual_gel_svg(gel)
+                st.image(svg, width="stretch")
+                st.caption(f"ラダー {gel['ladder']} / ゲル {gel['gel_percent']}% / "
+                           f"可視 {gel['visible_range_bp'][0]}～{gel['visible_range_bp'][1]} bp。"
+                           "完全消化と両アレルの増幅を仮定。"
+                           "副増幅のバンドは仮想画像には重ねていません。")
+                st.download_button("仮想ゲルSVGを保存", svg, "caps_maker_gel.svg",
+                                   "image/svg+xml")
+            except (ValueError, KeyError) as exc:
+                st.warning("ゲル表示に必要な情報がありません: " + str(exc))
 
-    st.markdown("#### AA / AB / BB 予測ゲル")
-    choice = st.selectbox(
-        "表示するマーカー",
-        list(range(len(visible))),
-        format_func=lambda i: f"{i+1}. {visible[i]['酵素']}"
-                              f" / {visible[i].get('設計方式', mode)}"
-                              f" / {visible[i]['マーカー型']}",
-    )
-    row = visible[choice]
-    fcol, rcol = st.columns(2)
-    with fcol:
-        st.caption("Forward · 5′ → 3′")
-        st.code(row["Forward(5'-3')"], language=None)
-    with rcol:
-        st.caption("Reverse · 5′ → 3′")
-        st.code(row["Reverse(5'-3')"], language=None)
-    st.dataframe(pd.DataFrame([
-        {"遺伝子型": "AA", "予測断片(bp)": row["A断片(bp)"]},
-        {"遺伝子型": "AB", "予測断片(bp)": row["AB断片(bp)"]},
-        {"遺伝子型": "BB", "予測断片(bp)": row["B断片(bp)"]},
-    ]), hide_index=True, width="stretch")
-    try:
-        gel = assess_gel(
-            parse_fragment_column(row["A断片(bp)"]),
-            parse_fragment_column(row["B断片(bp)"]),
-            st.session_state.get("active_gel_profile") or GelProfile(),
-        )
-        svg = virtual_gel_svg(gel)
-        st.image(svg, width=520)
-        st.download_button("仮想ゲルSVGを保存", svg, "caps_maker_gel.svg",
-                           "image/svg+xml")
-        st.caption(f"ラダー {gel['ladder']} / ゲル {gel['gel_percent']}% / "
-                   f"可視 {gel['visible_range_bp'][0]}～{gel['visible_range_bp'][1]} bp。"
-                   "完全消化と両アレルの増幅を仮定。"
-                   "副増幅のバンドは仮想画像には重ねていません。")
-    except (ValueError, KeyError) as exc:
-        st.warning("ゲル表示に必要な情報がありません: " + str(exc))
+    with file_tab:
+        st.caption("表示中の候補だけを書き出します。設定・出典JSONにはパスや系統名が含まれます。")
+        download1, download2, download3 = st.columns(3)
+        with download1:
+            st.download_button("結果CSV（Excel対応）", table_bytes(visible),
+                               "caps_maker_results.csv", "text/csv")
+        with download2:
+            st.download_button("結果TSV", table_bytes(visible, "\t"),
+                               "caps_maker_results.tsv", "text/tab-separated-values")
+        with download3:
+            if all("Forward(5'-3')" in row for row in visible):
+                ordered = set()
+                order_rows = []
+                for row in visible:
+                    key = (row["Forward(5'-3')"], row["Reverse(5'-3')"])
+                    if key in ordered:
+                        continue
+                    ordered.add(key)
+                    index = len(ordered)
+                    order_rows.extend([
+                        {"Primer ID": f"CAPS_{index:03d}_F",
+                         "Sequence 5'-3'": key[0], "Tm(°C)": row.get("Tm F(°C)", "")},
+                        {"Primer ID": f"CAPS_{index:03d}_R",
+                         "Sequence 5'-3'": key[1], "Tm(°C)": row.get("Tm R(°C)", "")},
+                    ])
+                st.download_button("プライマー発注CSV", table_bytes(order_rows),
+                                   "caps_maker_primer_order.csv", "text/csv")
+        download4, download5, _ = st.columns(3)
+        with download4:
+            bed = bed_bytes(visible)
+            if bed:
+                st.download_button("参照座標BED（産物）", bed, "caps_maker_amplicons.bed",
+                                   "text/plain")
+            else:
+                st.caption("参照座標のある候補がないためBEDは出力できません。")
+        with download5:
+            manifest = build_manifest(
+                {**(st.session_state.get("caps_config") or {"mode": mode}),
+                 "display_selection": {"three_genotypes": three_genotypes,
+                                       "specificity_policy": specificity_policy}}, visible,
+                databases=(st.session_state.get("caps_config") or {}).get("databases", []),
+                reference_files=(st.session_state.get("caps_config") or {}).get("reference_files"),
+                summary=st.session_state.get("caps_summary"),
+            )
+            st.download_button("設定・出典JSON（再現用）", manifest_bytes(manifest),
+                               "caps_maker_provenance.json", "application/json")
 
 
-template_controls()
-
+# The sidebar template must run before the widgets it fills in.
 with st.sidebar:
-    st.header("入力・設計")
-    input_mode = st.radio("配列の指定方法", [
-        "2つのFASTA配列", "参照区間＋2系統VCF",
-    ], index=1, key="input_mode")
-    run_mode = st.radio("解析方式", [
-        "制限酵素の探索", "新規プライマー設計", "既存プライマーから解析",
-        "区間マーカーを一括設計",
-    ], index=1, key="run_mode")
+    template_controls()
 
 design_tab, db_tab, enzyme_tab, gel_tab = st.tabs([
     "マーカー設計", "DB管理", "制限酵素", "ゲル・判定条件",
@@ -185,135 +191,115 @@ with db_tab:
 with enzyme_tab:
     enzymes = enzyme_manager()
 with gel_tab:
-    st.subheader("ジェノタイピングの目的")
-    goal = st.radio("識別したい遺伝子型", [
-        "AA・AB・BBを区別（ヘテロも判別）", "AAとBBを区別（ヘテロ判別は不要）",
-    ], key="goal")
-    three_genotypes = goal.startswith("AA・AB・BB")
-    st.caption("両系統での増幅予測と、完了したゲノム検索での特異性を必須にします。"
-               "未確認・判定不能の候補は表示しません。")
-    st.subheader("ゲル・ラダー条件")
-    preset = st.selectbox("実験プリセット",
-                          list(PROFILE_PRESETS) + ["詳細設定"], key="preset",
-                          on_change=reset_gel_settings, args=(st.session_state,))
-    base_profile = PROFILE_PRESETS.get(preset, GelProfile())
-    with st.expander("ゲルの詳細条件", expanded=preset == "詳細設定"):
-        ladder_choice = st.selectbox(
-            "ラダーマーカー",
-            ["auto", "100bp", "1kb", "custom"],
-            index=["auto", "100bp", "1kb", "custom"].index(base_profile.ladder), key="ladder_choice",
-        )
-        ladder_text = st.text_input(
-            "カスタムラダー（サイズbpをカンマ区切り）",
-            value="100, 200, 300, 400, 500, 600, 700, 800, 900, 1000", key="ladder_text"
-        )
-        concentrations = [None, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2,
-                          1.5, 2.0, 3.0, 4.0, 5.0]
-        gel_percentage = st.selectbox(
-            "ゲル濃度（%）",
-            concentrations, index=concentrations.index(base_profile.gel_percent),
-            format_func=lambda value: "自動推奨" if value is None else str(value) + "%", key="gel_percentage",
-        )
-        min_visible = st.number_input("検出可能な最小断片(bp)",
-                                      1, 5000, base_profile.min_visible_bp, key="min_visible")
-        max_visible = st.number_input("可視上限(bp、0は自動)",
-                                      0, 50000, 0, key="max_visible")
-        min_log_gap = st.number_input(
-            "ゲル上の分離閾値(log10)", 0.001, 0.500,
-            base_profile.min_log10_gap, 0.005, format="%.3f", key="min_log_gap")
-        gel_min_gap = st.number_input("参考：最低バンド差(bp)", 1, 500, 25, key="gel_min_gap")
-    try:
-        gel_profile = GelProfile(
-            ladder=ladder_choice,
-            custom_bands=parse_custom_ladder(ladder_text) if ladder_choice == "custom" else (),
-            gel_percent=gel_percentage,
-            min_visible_bp=int(min_visible),
-            min_log10_gap=float(min_log_gap),
-            max_visible_bp=int(max_visible) if max_visible else None,
-        )
-        gel_profile.validate()
-        st.session_state.active_gel_profile = gel_profile
-    except ValueError as exc:
-        st.error(str(exc))
-        gel_profile = GelProfile()
+    goal_col, gel_col = st.columns([1, 1.15], gap="large")
+    with goal_col:
+        st.subheader("ジェノタイピングの目的")
+        with st.container(key="cards_goal"):
+            goal = st.radio("識別したい遺伝子型", [
+                "AA・AB・BBを区別（ヘテロも判別）", "AAとBBを区別（ヘテロ判別は不要）",
+            ], key="goal", captions=[
+                "共優性マーカーのみ。F2など分離集団の遺伝子型判定向け",
+                "両ホモの識別だけでよい場合。優性型パターンも採用",
+            ])
+        three_genotypes = goal.startswith("AA・AB・BB")
+        st.caption("両系統での増幅予測と、完了したゲノム検索での特異性を必須にします。"
+                   "未確認・判定不能の候補は表示しません。")
+    with gel_col:
+        st.subheader("ゲル・ラダー条件")
+        preset = st.selectbox("実験プリセット",
+                              list(PROFILE_PRESETS) + ["詳細設定"], key="preset",
+                              on_change=reset_gel_settings, args=(st.session_state,))
+        base_profile = PROFILE_PRESETS.get(preset, GelProfile())
+        with st.expander("ゲルの詳細条件", expanded=preset == "詳細設定"):
+            g1, g2 = st.columns(2)
+            with g1:
+                ladder_choice = st.selectbox(
+                    "ラダーマーカー",
+                    ["auto", "100bp", "1kb", "custom"],
+                    index=["auto", "100bp", "1kb", "custom"].index(base_profile.ladder), key="ladder_choice",
+                )
+            with g2:
+                concentrations = [None, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2,
+                                  1.5, 2.0, 3.0, 4.0, 5.0]
+                gel_percentage = st.selectbox(
+                    "ゲル濃度（%）",
+                    concentrations, index=concentrations.index(base_profile.gel_percent),
+                    format_func=lambda value: "自動推奨" if value is None else str(value) + "%",
+                    key="gel_percentage",
+                )
+            ladder_text = st.text_input(
+                "カスタムラダー（サイズbpをカンマ区切り）",
+                value="100, 200, 300, 400, 500, 600, 700, 800, 900, 1000", key="ladder_text",
+                disabled=ladder_choice != "custom",
+            )
+            g3, g4 = st.columns(2)
+            with g3:
+                min_visible = st.number_input("検出可能な最小断片(bp)",
+                                              1, 5000, base_profile.min_visible_bp, key="min_visible")
+                min_log_gap = st.number_input(
+                    "ゲル上の分離閾値(log10)", 0.001, 0.500,
+                    base_profile.min_log10_gap, 0.005, format="%.3f", key="min_log_gap")
+            with g4:
+                max_visible = st.number_input("可視上限(bp、0は自動)",
+                                              0, 50000, 0, key="max_visible")
+                gel_min_gap = st.number_input("参考：最低バンド差(bp)", 1, 500, 25, key="gel_min_gap")
+        try:
+            gel_profile = GelProfile(
+                ladder=ladder_choice,
+                custom_bands=parse_custom_ladder(ladder_text) if ladder_choice == "custom" else (),
+                gel_percent=gel_percentage,
+                min_visible_bp=int(min_visible),
+                min_log10_gap=float(min_log_gap),
+                max_visible_bp=int(max_visible) if max_visible else None,
+            )
+            gel_profile.validate()
+            st.session_state.active_gel_profile = gel_profile
+        except ValueError as exc:
+            st.error(str(exc))
+            gel_profile = GelProfile()
 
 
 with design_tab:
-    st.subheader("検索に使うゲノム")
-    databases = primary_databases()
-    with st.expander("PCR / 特異性の詳細設定", expanded=False):
-        product_min = st.number_input("増幅産物長 下限(bp)", 70, 3000, 200, 10, key="product_min")
-        product_max = st.number_input("増幅産物長 上限(bp)", 70, 5000, 800, 10, key="product_max")
-        num_pairs = st.number_input("Primer3の候補ペア数", 1, 100, 12, key="num_pairs")
-        specificity_choice = st.radio(
-            "特異性判定方式",
-            ["厳密（標的以外の産物を認めない）",
-             "ゲル判別型（副産物も消化して評価）"], key="specificity_choice",
-        )
-        specificity_policy = (
-            "strict" if specificity_choice.startswith("厳密") else "gel-tolerant"
-        )
-        dcaps_choice = st.radio(
-            "dCAPS探索", ["CAPSのみ", "CAPSが使えなければdCAPS", "CAPS/dCAPS両方"],
-            index=1, key="dcaps_choice",
-        )
-        dcaps_mode = {
-            "CAPSのみ": "none",
-            "CAPSが使えなければdCAPS": "fallback",
-            "CAPS/dCAPS両方": "always",
-        }[dcaps_choice]
-        max_dcaps_mismatches = st.selectbox("dCAPS人工ミスマッチ数の上限", [1, 2], key="max_dcaps_mismatches")
-        st.caption("ゲル判別型は全副産物を実配列で再構成できた場合のみ合格。"
-                   "BLASTの探索未完了・参照座標不明なら採用しません。")
+    step = ui.StepCounter()
 
-    if run_mode == "区間マーカーを一括設計":
-        st.subheader("区間内のマーカー密度")
-        plan1, plan2, plan3 = st.columns(3)
-        with plan1:
-            panel_mode = st.selectbox("設計密度",
-                                      ["全酵素サイト", "一定間隔", "指定本数"], index=1, key="panel_mode")
-        with plan2:
-            spacing = st.number_input("目標間隔(bp)", 1, 10_000_000, 10000, 1000, key="spacing",
-                                      disabled=panel_mode != "一定間隔")
-            target_count = st.number_input("目標本数", 1, 1000, 20, key="target_count",
-                                           disabled=panel_mode != "指定本数")
-        with plan3:
-            max_discovery = st.number_input("探索変異上限", 1, 50000, 1000, 100, key="max_discovery")
-            max_targets = st.number_input("出力マーカー数の上限", 1, 1000, 100, 10, key="max_targets")
-        plan4, plan5 = st.columns(2)
-        with plan4:
-            min_spacing = st.number_input(
-                "マーカー間の最小物理間隔(bp、0で制限なし)", 0, 10_000_000, 0, 1000, key="min_spacing",
-                help="選ばれた座位どうしがこの距離未満にならないようにします。"
-                     "産物長やプライマー位置とは独立した物理距離です。")
-        with plan5:
-            radius = st.number_input(
-                "区画中心からの探索半径(bp、0で区画全体)", 0, 10_000_000, 0, 1000, key="radius")
+    # ---- 1. purpose ---------------------------------------------------------
+    step("解析の目的", "何を設計・確認するかを選びます。選んだ内容に合わせて以下の入力が変わります。")
+    with st.container(key="cards_run_mode"):
+        run_mode = st.radio("解析方式", list(RUN_MODES), captions=list(RUN_MODES.values()),
+                            key="run_mode", label_visibility="collapsed")
+    with st.container(key="seg_input_mode"):
+        input_mode = st.radio("配列の指定方法", INPUT_MODES, key="input_mode", horizontal=True)
+    if input_mode == "2つのFASTA配列" and run_mode != "制限酵素の探索":
+        st.warning("FASTA 2本の入力では参照座標とゲノム特異性を確認できないため、"
+                   "使える候補は表示されません。新規設計・既存プライマー・区間設計には参照区間＋2系統VCFを選んでください。")
 
-    primer_auto = False
-    if run_mode == "既存プライマーから解析":
-        st.subheader("プライマーから場所を指定")
-        primer_auto = not st.checkbox("場所も絞り込む（染色体・区間を指定）", key="primer_limit")
-        st.caption("両方のプライマーを5′→3′で入力します。場所は最初のBLAST DBで一意に確認します。")
-    else:
-        st.subheader("場所からマーカーを設計")
+    primer_mode = run_mode == "既存プライマーから解析"
+    primer_auto = primer_mode and not st.session_state.get("primer_limit", False)
 
     raw_a = raw_b = ""
     locus = alignment = selected_variant = None
     target_ref_pos = None
     source_args = None
     vcf_data = None
+    chrom = ""
+    region_start, region_end = 1, 8000
+    samples: list[str] = []
+    sample_a = sample_b = None
+    locus_tags: list[tuple[str, str]] = []
 
+    # ---- 2. data ------------------------------------------------------------
     if input_mode == "2つのFASTA配列":
-        st.subheader("2系統の配列を入力")
-        input_format = st.radio("配列入力", ["貼り付け", "FASTAアップロード"], horizontal=True)
+        step("2系統の配列", "各1本、8,000 bp以内。貼り付けかFASTAファイルで入力します。")
+        with st.container(key="seg_input_format"):
+            input_format = st.radio("配列入力", ["貼り付け", "FASTAアップロード"], horizontal=True,
+                                    label_visibility="collapsed")
         ca, cb = st.columns(2)
         if input_format == "貼り付け":
             with ca:
-                raw_a = st.text_area("配列A（野生型など）", height=160,
+                raw_a = st.text_area("配列A（野生型など）", height=180,
                                      placeholder=">allele_A\nATG...")
             with cb:
-                raw_b = st.text_area("配列B（変異型など）", height=160,
+                raw_b = st.text_area("配列B（変異型など）", height=180,
                                      placeholder=">allele_B\nATG...")
         else:
             with ca:
@@ -328,51 +314,76 @@ with design_tab:
                 record_b = parse_sequence(raw_b)
                 locus = (record_a.sequence, record_b.sequence)
                 alignment = align_alleles(*locus)
-                st.caption(f"A={len(locus[0])} bp / B={len(locus[1])} bp / "
-                           f"多型 {len(alignment.variants)} 件")
+                ui.chips([(f"A {len(locus[0]):,} bp", ""), (f"B {len(locus[1]):,} bp", ""),
+                          (f"多型 {len(alignment.variants)} 件", "ok" if alignment.variants else "")])
             except ValueError as exc:
                 st.error(str(exc))
-        if run_mode == "区間マーカーを一括設計":
-            st.warning("大量マーカー設計には参照区間＋2系統VCFを選んでください。")
     else:
-        st.subheader("参照ゲノムの区間と2系統")
-        rc1, rc2 = st.columns(2)
+        step("使うデータ", "参照配列・2系統のVCF・特異性検索用のBLAST DBを、DB管理で登録した名前から選びます。")
+        rc1, rc2 = st.columns(2, gap="large")
         with rc1:
-            ref_kind = st.radio("参照配列ソース", ["FASTA", "BLAST DB"], horizontal=True,
-                                index=1 if primer_auto else 0)
+            with st.container(key="seg_ref_kind"):
+                ref_kind = st.radio("参照配列ソース", ["FASTA", "BLAST DB"], horizontal=True,
+                                    index=1 if primer_auto else 0)
             ref_locator = resource_picker(
                 "参照FASTA" if ref_kind == "FASTA" else "BLAST DB",
                 "登録した参照データ", "reference_resource_" + ref_kind)
-            chrom = "" if primer_auto else st.text_input("染色体・コンティグID", placeholder="Chr4")
         with rc2:
             vcf_path = resource_picker("VCF", "登録した2系統のVCF", "vcf_resource")
-            if primer_auto:
-                region_start, region_end = 1, 8000
-                st.caption("座標はプライマーの検索結果から決定します。")
-            else:
-                region_start = st.number_input("参照開始(1-based)", 1, 10**10, 1, step=1)
-                region_end = st.number_input("参照終了(1-based, inclusive)",
-                                             1, 10**10, 8000, step=1)
-        samples = []
         if vcf_path and Path(vcf_path).exists():
             try:
                 samples = cached_sample_names(vcf_path)
             except (OSError, ValueError) as exc:
                 st.error("VCFのヘッダーを読めません: " + str(exc))
-        a_sel, b_sel = st.columns(2)
+        a_sel, b_sel = st.columns(2, gap="large")
         with a_sel:
             sample_a = st.selectbox("系統A（VCFサンプル）", samples, index=0 if samples else None)
         with b_sel:
             sample_b = st.selectbox("系統B（VCFサンプル）", samples,
                                     index=1 if len(samples) > 1 else 0 if samples else None)
+        if sample_a and sample_a == sample_b:
+            st.warning("系統Aと系統Bに異なるサンプルを選んでください。")
+        ui.subheading("特異性を確認するゲノム")
+        databases = primary_databases()
+
+    if input_mode == "2つのFASTA配列":
+        databases = []
+
+    # ---- 3. location / target -------------------------------------------------
+    if primer_mode:
+        step("既存プライマー", "両方のプライマーを5′→3′で入力します。場所は最初のBLAST DBで一意に確認します。")
+        ec1, ec2 = st.columns(2, gap="large")
+        with ec1:
+            existing_forward = st.text_input("Forward（5'→3'）")
+        with ec2:
+            existing_reverse = st.text_input("Reverse（5'→3'）")
+        if input_mode != "2つのFASTA配列":
+            st.checkbox("場所も絞り込む（染色体・区間を指定）", key="primer_limit")
+    elif input_mode != "2つのFASTA配列":
+        step("場所" if run_mode != "区間マーカーを一括設計" else "区間とマーカー密度",
+             "参照ゲノム上の染色体と区間（1-based、両端を含む）を指定します。")
+
+    if input_mode != "2つのFASTA配列" and not primer_auto:
+        l1, l2, l3 = st.columns([1.2, 1, 1])
+        with l1:
+            chrom = st.text_input("染色体・コンティグID", placeholder="Chr4")
+        with l2:
+            region_start = st.number_input("参照開始(1-based)", 1, 10**10, 1, step=1)
+        with l3:
+            region_end = st.number_input("参照終了(1-based, inclusive)",
+                                         1, 10**10, 8000, step=1)
+
+    if input_mode != "2つのFASTA配列":
         if (ref_locator and sample_a and sample_b and sample_a != sample_b
                 and (primer_auto or (chrom and region_end >= region_start))):
             source_args = (
                 ref_kind, ref_locator, chrom, int(region_start), int(region_end),
                 vcf_path, sample_a, sample_b,
             )
-            st.caption((f"プライマーから場所を決定 / {sample_a} vs {sample_b}" if primer_auto
-                        else f"{chrom}:{region_start:,}–{region_end:,} / {sample_a} vs {sample_b}"))
+            locus_tags = [(f"{sample_a} vs {sample_b}", "key"),
+                          ("場所はプライマーの検索結果から決定", "") if primer_auto
+                          else (f"{chrom}:{int(region_start):,}–{int(region_end):,}"
+                                f"（{int(region_end) - int(region_start) + 1:,} bp）", "")]
             if run_mode not in ("区間マーカーを一括設計", "既存プライマーから解析"):
                 if int(region_end) - int(region_start) + 1 <= 8000:
                     try:
@@ -384,25 +395,15 @@ with design_tab:
                         locus = (win.a, win.b)
                         alignment = align_alleles(*locus)
                         st.session_state.single_locus_window = win
-                        st.caption(f"区間内の異なるVCF変異 {sum(v.different for v in vcf_data)}件")
+                        n_diff = sum(v.different for v in vcf_data)
+                        locus_tags.append((f"区間内の異なるVCF変異 {n_diff}件", "ok" if n_diff else ""))
                     except (OSError, ValueError, RuntimeError) as exc:
                         st.error(str(exc))
                 else:
-                    st.caption("長い区間です。新規設計では下の標的ゲノム座標を指定するか、"
-                               "区間一括設計モードを使用してください。")
-        elif source_args is None:
-            st.info("参照、染色体、異なる2サンプル、正しい開始/終了座標を指定してください。")
-
-    if run_mode == "既存プライマーから解析":
-        st.subheader("既存PCRプライマー")
-        ec1, ec2 = st.columns(2)
-        with ec1:
-            existing_forward = st.text_input("Forward（5'→3'）")
-        with ec2:
-            existing_reverse = st.text_input("Reverse（5'→3'）")
+                    locus_tags.append(("8,000 bp超：標的座標を指定して設計", ""))
+            ui.chips(locus_tags)
 
     if run_mode == "新規プライマー設計":
-        st.subheader("標的多型")
         if source_args and not locus:
             target_ref_pos = st.number_input(
                 "標的の参照座標(1-based)", min_value=int(region_start),
@@ -413,8 +414,74 @@ with design_tab:
                 format_func=lambda i: alignment.variants[i].label,
             )
             selected_variant = alignment.variants[index]
-        else:
+        elif input_mode == "2つのFASTA配列" or source_args:
             st.caption("配列A/B間に多型があることを確認してください。")
+
+    if run_mode == "区間マーカーを一括設計":
+        if input_mode == "2つのFASTA配列":
+            step("区間とマーカー密度")
+        ui.subheading("マーカーの配置")
+        plan1, plan2, plan3 = st.columns(3)
+        with plan1:
+            panel_mode = st.selectbox("設計密度",
+                                      ["全酵素サイト", "一定間隔", "指定本数"], index=1, key="panel_mode")
+            max_targets = st.number_input("出力マーカー数の上限", 1, 1000, 100, 10, key="max_targets")
+        with plan2:
+            spacing = st.number_input("目標間隔(bp)", 1, 10_000_000, 10000, 1000, key="spacing",
+                                      disabled=panel_mode != "一定間隔")
+            target_count = st.number_input("目標本数", 1, 1000, 20, key="target_count",
+                                           disabled=panel_mode != "指定本数")
+        with plan3:
+            min_spacing = st.number_input(
+                "マーカー間の最小物理間隔(bp、0で制限なし)", 0, 10_000_000, 0, 1000, key="min_spacing",
+                help="選ばれた座位どうしがこの距離未満にならないようにします。"
+                     "産物長やプライマー位置とは独立した物理距離です。")
+            radius = st.number_input(
+                "区画中心からの探索半径(bp、0で区画全体)", 0, 10_000_000, 0, 1000, key="radius")
+        with st.expander("探索の上限"):
+            max_discovery = st.number_input("探索変異上限", 1, 50000, 1000, 100, key="max_discovery")
+        if panel_mode == "一定間隔":
+            st.caption(f"目標間隔 {int(spacing):,} bp（{spacing / 1000:g} kb）。マーカー間の距離であり、PCR産物長とは別です。")
+        elif panel_mode == "指定本数":
+            st.caption(f"区間を{int(target_count)}等分し、各区画から最大1座位を選びます。候補がなければ空白にします。")
+
+    # ---- 4. PCR conditions ------------------------------------------------------
+    step("PCRと特異性の条件",
+         "増幅産物長とPrimer3の候補数、オフターゲット産物の扱い、dCAPSの探索方法を決めます。"
+         if run_mode != "制限酵素の探索" else
+         "制限酵素の探索では使いません（新規設計・既存プライマー・区間設計で使用）。")
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        product_min = st.number_input("増幅産物長 下限(bp)", 70, 3000, 200, 10, key="product_min")
+    with p2:
+        product_max = st.number_input("増幅産物長 上限(bp)", 70, 5000, 800, 10, key="product_max")
+    with p3:
+        num_pairs = st.number_input("Primer3の候補ペア数", 1, 100, 12, key="num_pairs")
+    with st.expander("特異性判定とdCAPSの詳細"):
+        s1, s2 = st.columns(2, gap="large")
+        with s1:
+            specificity_choice = st.radio(
+                "特異性判定方式",
+                ["厳密（標的以外の産物を認めない）",
+                 "ゲル判別型（副産物も消化して評価）"], key="specificity_choice",
+            )
+            max_dcaps_mismatches = st.selectbox("dCAPS人工ミスマッチ数の上限", [1, 2],
+                                                key="max_dcaps_mismatches")
+        with s2:
+            dcaps_choice = st.radio(
+                "dCAPS探索", ["CAPSのみ", "CAPSが使えなければdCAPS", "CAPS/dCAPS両方"],
+                index=1, key="dcaps_choice",
+            )
+        st.caption("ゲル判別型は全副産物を実配列で再構成できた場合のみ合格。"
+                   "BLASTの探索未完了・参照座標不明なら採用しません。")
+    specificity_policy = (
+        "strict" if specificity_choice.startswith("厳密") else "gel-tolerant"
+    )
+    dcaps_mode = {
+        "CAPSのみ": "none",
+        "CAPSが使えなければdCAPS": "fallback",
+        "CAPS/dCAPS両方": "always",
+    }[dcaps_choice]
 
     signature = parsing_sig(
         raw_a, raw_b, source_args, run_mode, enzymes,
@@ -455,14 +522,25 @@ with design_tab:
         ),
     }
 
+    # ---- 5. run --------------------------------------------------------------
+    step("実行", "準備が整った項目に ✓ が付きます。すべて揃うと実行できます。")
+    checks = [(bool(enzymes), f"制限酵素 {len(enzymes)} 種", "「制限酵素」タブで変更")]
+    if run_mode == "制限酵素の探索":
+        checks.append((bool(locus) or bool(source_args), "解析する2配列",
+                       "8,000 bp以下の2配列または参照区間"))
+    else:
+        checks.append((bool(databases), "特異性検索用BLAST DB",
+                       "「DB管理」で登録し、上で選択" if not databases else ""))
+        checks.append((bool(source_args), "参照・VCF・異なる2系統" + ("" if primer_auto else "・区間"),
+                       "使える候補の表示には参照座標の確認が必要" if not source_args else ""))
+        if primer_mode:
+            checks.append((bool(existing_forward and existing_reverse), "Forward / Reverseプライマー", ""))
+    ui.checklist(checks)
+
     if run_mode in ("制限酵素の探索", "新規プライマー設計", "既存プライマーから解析"):
         available = bool(enzymes) and (bool(locus) or bool(source_args))
         if run_mode != "制限酵素の探索":
             available = available and bool(databases) and bool(source_args)
-            if not databases:
-                st.info("DB管理でBLAST DBを登録し、上の「検索に使うゲノム」で選んでください。")
-            if not source_args:
-                st.caption("使える候補の表示には参照座標の確認が必要です。参照区間＋2系統VCFを指定してください。")
         if st.button("CAPS候補を解析", type="primary", disabled=not available):
             try:
                 window = st.session_state.get("single_locus_window") if source_args and locus else None
@@ -556,10 +634,7 @@ with design_tab:
         batch_sig = parsing_sig(source_args, enzymes, panel_mode, spacing,
                                 target_count, max_discovery, max_targets, dcaps_mode,
                                 min_spacing, radius)
-        if panel_mode == "一定間隔":
-            st.caption(f"目標間隔 {int(spacing):,} bp（{spacing / 1000:g} kb）。マーカー間の距離であり、PCR産物長とは別です。")
-        elif panel_mode == "指定本数":
-            st.caption(f"区間を{int(target_count)}等分し、各区画から最大1座位を選びます。候補がなければ空白にします。")
+        ui.subheading("ステップ1　区間内のCAPS/dCAPSサイトを探索")
         if st.button("ステップ1：CAPS/dCAPSサイトを先に探索", type="primary", disabled=not source_args or not enzymes):
             try:
                 with st.spinner("区間内の制限酵素サイトを探索中"):
@@ -588,11 +663,11 @@ with design_tab:
 
         if "batch_sites" in st.session_state and source_args:
             stats = st.session_state["batch_stats"]
-            st.caption(
-                f"差のある変異 {stats['n_differential_variants']} 件 / "
-                f"認識サイト {stats['n_sites']} 件（{stats.get('loci', '?')} 座位） / "
-                f"設計対象 {stats['selected']} 件（{stats.get('selected_loci', '?')} 座位）"
-            )
+            ui.stats([
+                ("差のある変異", stats["n_differential_variants"], ""),
+                (f"認識サイト（{stats.get('loci', '?')} 座位）", stats["n_sites"], ""),
+                (f"設計対象（{stats.get('selected_loci', '?')} 座位）", stats["selected"], "key"),
+            ])
             if stats.get("truncated"):
                 st.warning("設計対象が上限を超えています。上限件数までの結果です。")
             if batch_sig != st.session_state.get("batch_sig"):
@@ -609,7 +684,8 @@ with design_tab:
                      "酵素": x.enzyme, "種類": x.kind}
                     for x in planned
                 ]
-                st.dataframe(pd.DataFrame(data), hide_index=True, width="stretch")
+                with st.expander(f"設計対象サイト {len(planned)} 件"):
+                    st.dataframe(pd.DataFrame(data), hide_index=True, width="stretch")
                 if uncovered:
                     with st.expander(f"未カバー区画 {len(uncovered)} 件（候補を補充していません）"):
                         st.dataframe(pd.DataFrame(uncovered), hide_index=True,
@@ -617,6 +693,7 @@ with design_tab:
                         st.download_button("未カバー区画CSV", table_bytes(uncovered),
                                            "caps_maker_uncovered_bins.csv", "text/csv")
                 if planned:
+                    ui.subheading("ステップ2　選んだサイトのプライマーをPrimer-BLASTで設計")
                     indices = st.multiselect(
                         "プライマーを設計するサイト",
                         list(range(len(planned))),
@@ -635,7 +712,7 @@ with design_tab:
                     finished = sum((design_sig, planned[i].identifier) in done for i in indices)
                     bcol1, bcol2 = st.columns([3, 1])
                     with bcol2:
-                        if st.button("途中結果を破棄", disabled=not done):
+                        if st.button("途中結果を破棄", disabled=not done, width="stretch"):
                             st.session_state["batch_done"] = {}
                             st.rerun()
                     if finished:
@@ -644,7 +721,7 @@ with design_tab:
                     with bcol1:
                         start_batch = st.button(
                             "ステップ2：選択サイトのPrimer-BLASTを実行（中断・再開可）",
-                            disabled=not indices)
+                            type="primary", disabled=not indices)
                     if start_batch:
                         progress = st.progress(0.0)
                         status_line = st.empty()
@@ -734,6 +811,7 @@ with design_tab:
                                       "selected_sites": [planned[i].identifier for i in indices]},
                         }
 
+    # ---- 6. results ----------------------------------------------------------
     if "caps_results" in st.session_state:
         expected_signature = batch_sig if run_mode == "区間マーカーを一括設計" and source_args else signature
         current_results = (
@@ -741,7 +819,9 @@ with design_tab:
             and st.session_state.get("caps_signature") == expected_signature
             and st.session_state.get("caps_analysis_signature") == signature
         )
+        step("結果")
         if current_results:
+            show_result_table(st.session_state["caps_results"], run_mode)
             summary = st.session_state.get("caps_summary") or {}
             if summary.get("all_products"):
                 with st.expander("特異性の根拠：予測された全PCR産物"):
@@ -754,13 +834,20 @@ with design_tab:
                         "未成功サイトCSV", table_bytes(summary["failed"]),
                         "caps_maker_unresolved.csv", "text/csv",
                     )
-            show_result_table(st.session_state["caps_results"], run_mode)
         else:
             st.info("入力または解析条件が変わりました。再解析すると使える候補を表示します。")
 
-    st.info(
-        "スコアは実験成功確率ではなく設計上の優先順位です。"
-        "CAPS探索単独は入力DNAの全長消化でありPCR産物の結果ではありません。"
-        "dCAPSはプライマー改変によって実際のPCR産物配列が変わるため、"
-        "提案されたプライマーと酵素で必ず実験検証してください。"
-    )
+    ui.footer(CAUTION)
+
+with st.sidebar:
+    st.divider()
+    db_label = f"{len(databases)} 件" if databases else "未選択"
+    ui.sidebar_summary([
+        ("解析方式", run_mode),
+        ("制限酵素", f"{len(enzymes)} 種"),
+        ("判別する遺伝子型", "AA・AB・BB" if three_genotypes else "AA・BB"),
+        ("ゲル", preset),
+        ("PCR産物長", f"{int(product_min)}–{int(product_max)} bp"),
+        ("特異性判定", "厳密" if specificity_policy == "strict" else "ゲル判別型"),
+        ("BLAST DB", db_label),
+    ], CAUTION)

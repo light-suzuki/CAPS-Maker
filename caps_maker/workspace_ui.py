@@ -13,33 +13,31 @@ def template_controls() -> None:
     saved = load_catalog()["design_templates"]
     options = {"builtin:" + k: v for k, v in BUILTINS.items()}
     options.update({"saved:" + entry["id"]: entry for entry in saved})
-    with st.expander("設計テンプレート", expanded=True):
-        left, right = st.columns([1.3, 1])
-        with left:
-            chosen = st.selectbox("テンプレートを選ぶ", list(options), key="template_choice",
-                                  format_func=lambda v: options[v]["name"])
-            if st.button("このテンプレートを適用", type="primary"):
-                try:
-                    apply_settings(options[chosen]["settings"], st.session_state)
-                    st.success("適用しました。場所・系統・DBを選んで解析してください。")
-                except (TypeError, ValueError) as exc:
-                    st.error(str(exc))
-            st.caption("マーカーの間隔・本数とPCR産物長は別々に指定できます。")
-        with right:
-            with st.form("save_design_template"):
-                name = st.text_input("設定を保存する名前", placeholder="例：F2用・50 kb間隔")
-                submit = st.form_submit_button("現在の設定をテンプレート保存")
-            if submit:
-                try:
-                    old = next((e for e in saved if e["name"] == name.strip()), None)
-                    entry = {"name": name, "settings": snapshot_settings(st.session_state)}
-                    if old:
-                        entry["id"] = old["id"]
-                    upsert_entry("design_templates", entry)
-                    st.success("保存しました。次回もこの端末で選べます。")
-                except (OSError, ValueError) as exc:
-                    st.error(str(exc))
-        st.caption("条件だけを保存します。DB・座標・試料名・プライマー配列は入力ごとに指定します。")
+    # Rendered in the sidebar; it must run before the widgets it fills in.
+    st.subheader("設計テンプレート")
+    chosen = st.selectbox("テンプレートを選ぶ", list(options), key="template_choice",
+                          format_func=lambda v: options[v]["name"])
+    if st.button("このテンプレートを適用", width="stretch"):
+        try:
+            apply_settings(options[chosen]["settings"], st.session_state)
+            st.success("適用しました。場所・系統・DBを選んで解析してください。")
+        except (TypeError, ValueError) as exc:
+            st.error(str(exc))
+    with st.expander("現在の設定を保存"):
+        with st.form("save_design_template", border=False):
+            name = st.text_input("設定を保存する名前", placeholder="例：F2用・50 kb間隔")
+            submit = st.form_submit_button("現在の設定をテンプレート保存", width="stretch")
+        st.caption("条件だけを保存します。DB・座標・試料名・プライマー配列は含めません。")
+    if submit:
+        try:
+            old = next((e for e in saved if e["name"] == name.strip()), None)
+            entry = {"name": name, "settings": snapshot_settings(st.session_state)}
+            if old:
+                entry["id"] = old["id"]
+            upsert_entry("design_templates", entry)
+            st.success("保存しました。次回もこの端末で選べます。")
+        except (OSError, ValueError) as exc:
+            st.error(str(exc))
 
 
 def resource_picker(kind: str, label: str, key: str) -> str:
@@ -110,7 +108,9 @@ def enzyme_manager() -> list[str]:
     pool = available_enzymes()
     saved = load_catalog()["enzyme_sets"]
     by_id = {e["id"]: e for e in saved}
-    mode = st.radio("使用する酵素", ["指定した酵素", "保存した酵素セット", "全酵素"], horizontal=True, key="enzyme_mode")
+    with st.container(key="seg_enzyme_mode"):
+        mode = st.radio("使用する酵素", ["指定した酵素", "保存した酵素セット", "全酵素"],
+                        horizontal=True, key="enzyme_mode")
     left, right = st.columns([1.1, 1], gap="large")
     with left:
         preset = None

@@ -1,0 +1,39 @@
+# Colours and type follow the Digital Agency Design System (デジタル庁デザインシステム)
+# tokens, @digital-go-jp/design-tokens v2.1.0 (MIT). See caps_maker/ui.py.
+
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#0017c1"            # key-900 (blue-900)
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f2f2f2"  # solid-gray-50
+textColor = "#1a1a1a"               # solid-gray-900
+linkColor = "#0017c1"
+borderColor = "#cccccc"             # solid-gray-200
+showWidgetBorder = true
+baseRadius = "8px"                  # border-radius-8
+baseFontSize = 16
+font = "'Noto Sans JP':https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap, sans-serif"
+headingFont = "'Noto Sans JP', sans-serif"
+codeFont = "'Noto Sans Mono':https://fonts.googleapis.com/css2?family=Noto+Sans+Mono:wght@400;700&display=swap, monospace"
+redColor = "#ec0000"                # error-1
+greenColor = "#197a4b"              # success-2
+blueColor = "#0017c1"
+yellowColor = "#b78f00"             # warning-yellow-1
+blueBackgroundColor = "#e8f1fe"     # key-50
+redBackgroundColor = "#fdeeee"      # red-50
+greenBackgroundColor = "#e6f5ec"    # green-50
+yellowBackgroundColor = "#fbf5e0"   # yellow-50
+blueTextColor = "#00118f"           # key-1000
+redTextColor = "#ce0000"            # error-2
+greenTextColor = "#115a36"          # green-900
+yellowTextColor = "#927200"         # warning-yellow-2
+
+[theme.sidebar]
+backgroundColor = "#f8f8fb"
+secondaryBackgroundColor = "#ffffff"
